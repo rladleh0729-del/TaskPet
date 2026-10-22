@@ -1,0 +1,1017 @@
+# TaskPet — Claude Code · Codex 작업 알림 펫
+#
+# 화면 오른쪽 아래에 주황 픽셀 로봇이 떠서, AI 코딩 도구가
+# 일하는 중인지 / 끝났는지 / 내 승인을 기다리는지 알려 준다.
+#
+#   TaskPet.exe              처음 실행하면 설치, 설치된 곳에서 실행하면 로봇
+#   TaskPet.exe --uninstall  제거
+#
+# Claude Code: 훅(taskpet-hook.exe)이 events.jsonl에 신호를 적으면 여기서 읽는다.
+# Codex(ChatGPT 앱·CLI): ~/.codex/sessions 기록 파일을 지켜본다 (설정 변경 없음).
+import ctypes
+import glob
+import json
+import math
+import os
+import random
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import time
+import tkinter as tk
+import wave
+import winreg
+import winsound
+from datetime import datetime, timedelta
+
+from PIL import Image, ImageDraw, ImageTk
+
+APP = "TaskPet"
+VERSION = "1.0.0"
+HOME = os.path.expanduser("~")
+INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
+HOOK_EXE = "taskpet-hook.exe"
+FROZEN = getattr(sys, "frozen", False)
+APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
+EVENTS = os.path.join(APP_DIR, "events.jsonl")
+STATE = os.path.join(APP_DIR, "state.json")
+QUIT_FLAG = os.path.join(APP_DIR, "quit.flag")
+CLAUDE_DIR = os.path.join(HOME, ".claude")
+CODEX_DIR = os.path.join(HOME, ".codex")
+NO_WINDOW = 0x08000000
+
+# ---- 언어 ----
+KO = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0xFF == 0x12
+T = {
+    "working": ("{d} 진행 중", "working {d}"),
+    "waiting": ("응답 대기 {d}째", "waiting for you {d}"),
+    "done": ("완료 {w} · {d}", "done {w} · {d}"),
+    "more": ("… 외 {n}개", "… {n} more"),
+    "clear": ("완료 기록 모두 지우기", "Clear finished"),
+    "quit": ("종료", "Quit"),
+    "uninstall": ("TaskPet 제거", "Uninstall TaskPet"),
+    "installed": ("TaskPet 설치 완료!\n\n화면 오른쪽 아래 주황 로봇이 Claude Code와 Codex 작업을 알려 줍니다.\n\n· 이미 열려 있던 Claude Code 세션은 새로 시작해야 잡힙니다.\n· 로봇 클릭 = 말풍선 숨기기, 줄 더블 클릭 = 그 대화 열기, 우클릭 = 메뉴",
+                  "TaskPet installed!\n\nThe orange robot at the bottom right shows your Claude Code and Codex tasks.\n\n· Claude Code sessions that were already open need to be restarted.\n· Click robot = hide bubble, double-click a row = open that chat, right-click = menu"),
+    "no_claude": ("\n\n(Claude Code 설정을 찾지 못해 Codex만 연결했습니다.)",
+                  "\n\n(Claude Code settings not found, only Codex is connected.)"),
+    "bad_settings": ("~/.claude/settings.json 을 읽을 수 없어 Claude Code 연결을 건너뛰었습니다. 파일 형식을 확인해 주세요.",
+                     "Could not read ~/.claude/settings.json, so Claude Code was not connected. Please check the file."),
+    "ask_uninstall": ("TaskPet을 제거할까요?\nClaude Code 훅 설정과 자동 실행도 함께 지워집니다.",
+                      "Uninstall TaskPet?\nIts Claude Code hooks and auto-start will be removed."),
+    "uninstalled": ("TaskPet을 제거했습니다.", "TaskPet has been uninstalled."),
+}
+
+
+def t(key, **kw):
+    return T[key][0 if KO else 1].format(**kw)
+
+
+def msgbox(text, flags=0x40):
+    return ctypes.windll.user32.MessageBoxW(None, text, APP, flags | 0x10000)
+
+
+# ---- 화면 배율 ----
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    pass
+DPI = 1.0
+
+
+def S(v):
+    return int(round(v * DPI))
+
+
+# ---- 색 ----
+KEY = "#0b0c0d"      # 이 색이 투명해짐
+INNER = "#221c28"
+BORDER = "#f5942b"
+FG = "#e8e8ec"
+SUB = "#9a9aa6"
+ACCENT = "#f5942b"
+GREEN = "#4cc46a"
+RED = "#ff6b6b"
+FONT = "맑은 고딕" if KO else "Segoe UI"
+
+# ---- 픽셀 로봇 (15 x 16) ----
+IDLE = [
+    ".......O.......",
+    "......OOO......",
+    ".......D.......",
+    "..DDDDDDDDDDD..",
+    ".DOOOOOOOOOOOD.",
+    ".DOFFFFFFFFFOD.",
+    ".DOFEEFFFEEFOD.",
+    ".DOFFFFFFFFFOD.",
+    ".DOFFMMMMMFFOD.",
+    ".DOOOOOOOOOOOD.",
+    "..DDDDDDDDDDD..",
+    "...DOOOOOOOD...",
+    "..ODOOOOOOODO..",
+    "...DDDDDDDDD...",
+    "....DD...DD....",
+    "....DD...DD....",
+]
+BLINK = IDLE[:6] + [".DOFFFFFFFFFOD."] + IDLE[7:]
+WORK_A = IDLE[:11] + ["..ODOOOOOOOD...", "...DOOOOOOODO.."] + IDLE[13:]
+WORK_B = IDLE[:11] + ["...DOOOOOOODO..", "..ODOOOOOOOD..."] + IDLE[13:]
+PALETTE = {"O": "#f5942b", "D": "#a85a0e", "F": "#2a2230", "M": "#ffb15e"}
+EYE = {"idle": "#ffffff", "work": "#ffd84d", "happy": "#76ff9e", "alert": RED}
+
+
+def fmt_dur(sec):
+    sec = max(0, int(sec))
+    if KO:
+        if sec < 60:
+            return f"{sec}초"
+        if sec < 3600:
+            return f"{sec // 60}분 {sec % 60}초"
+        return f"{sec // 3600}시간 {sec % 3600 // 60}분"
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m {sec % 60}s"
+    return f"{sec // 3600}h {sec % 3600 // 60}m"
+
+
+def work_area():
+    class RECT(ctypes.Structure):
+        _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                    ("r", ctypes.c_long), ("b", ctypes.c_long)]
+    r = RECT()
+    ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0)
+    return r.l, r.t, r.r, r.b
+
+
+# ---- 알림음 ----
+# Windows 기본 소리는 사람마다 꺼져 있거나 너무 작아서, 직접 만든 소리를 튼다.
+VOLUME = 0.15  # 최대 음량 대비 (0~1)
+SOUNDS = {
+    # (시작 초, 주파수 Hz, 울림 초, 세기) — 음이 겹치며 종처럼 울린다
+    "done": [(0.00, 1567.98, 0.9, 0.8),     # 띠 (솔)
+             (0.09, 2093.00, 1.2, 1.0)],    # 링 (높은 도)
+    "wait": [(0.00, 987.77, 0.45, 0.8),     # 똑 (시)
+             (0.22, 987.77, 0.45, 0.8),     # 똑
+             (0.44, 783.99, 0.7, 0.7)],     # 똑 (솔, 내려감)
+}
+
+
+def make_sounds():
+    rate = 44100
+    for name, notes in SOUNDS.items():
+        path = os.path.join(APP_DIR, f"{name}.wav")
+        total = max(s + d for s, _, d, _ in notes)
+        buf = [0.0] * int(rate * total)
+        for start, freq, dur, amp in notes:
+            s0 = int(rate * start)
+            n = int(rate * dur)
+            for i in range(n):
+                tt = i / rate
+                env = min(1.0, i / (rate * 0.004)) * math.exp(-5.0 * tt / dur)
+                # 기본음 + 맑은 배음 + 살짝 어긋난 종소리 배음
+                v = (math.sin(2 * math.pi * freq * tt)
+                     + 0.35 * math.sin(2 * math.pi * freq * 2 * tt) * math.exp(-8 * tt)
+                     + 0.15 * math.sin(2 * math.pi * freq * 2.76 * tt) * math.exp(-12 * tt))
+                buf[s0 + i] += amp * env * v / 1.5
+        peak = max(1e-9, max(abs(v) for v in buf))
+        frames = b"".join(struct.pack("<h", int(v / peak * VOLUME * 32767)) for v in buf)
+        try:
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(rate)
+                w.writeframes(frames)
+        except OSError:
+            pass
+
+
+def play(name):
+    path = os.path.join(APP_DIR, f"{name}.wav")
+    try:
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC
+                           | winsound.SND_NODEFAULT)
+    except Exception:
+        pass
+
+
+def read_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def write_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+# ======================================================================
+# 설치 / 제거
+# ======================================================================
+HOOK_EVENTS = {
+    "UserPromptSubmit": "start",
+    "Stop": "stop",
+    "Notification": "wait",
+    "PostToolUse": "resume",
+    "SessionEnd": "end",
+}
+UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\TaskPet"
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def is_ours(hook):
+    return HOOK_EXE in str(hook.get("command", ""))
+
+
+def strip_our_hooks(settings):
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    for ev in list(hooks):
+        groups = hooks[ev]
+        if not isinstance(groups, list):
+            continue
+        new_groups = []
+        for g in groups:
+            if isinstance(g, dict) and isinstance(g.get("hooks"), list):
+                g["hooks"] = [h for h in g["hooks"] if not is_ours(h)]
+                if not g["hooks"]:
+                    continue
+            new_groups.append(g)
+        if new_groups:
+            hooks[ev] = new_groups
+        else:
+            del hooks[ev]
+    if not hooks:
+        del settings["hooks"]
+
+
+def install_claude_hooks(hook_path):
+    """~/.claude/settings.json에 우리 훅을 더한다. 남의 설정은 건드리지 않는다."""
+    if not os.path.isdir(CLAUDE_DIR):
+        return "none"
+    path = os.path.join(CLAUDE_DIR, "settings.json")
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                settings = json.load(f)
+            if not isinstance(settings, dict):
+                raise ValueError
+        except Exception:
+            return "bad"
+        backup = path + ".taskpet-backup"
+        if not os.path.exists(backup):
+            shutil.copy2(path, backup)
+    else:
+        settings = {}
+    strip_our_hooks(settings)
+    hooks = settings.setdefault("hooks", {})
+    for ev, arg in HOOK_EVENTS.items():
+        hooks.setdefault(ev, []).append({"hooks": [{
+            "type": "command",
+            "command": f'"{hook_path}" {arg}',
+            "timeout": 5,
+        }]})
+    write_json(path, settings)
+    return "ok"
+
+
+def remove_claude_hooks():
+    path = os.path.join(CLAUDE_DIR, "settings.json")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            settings = json.load(f)
+        strip_our_hooks(settings)
+        write_json(path, settings)
+    except Exception:
+        pass
+
+
+def stop_running_widget(folder):
+    flag = os.path.join(folder, "quit.flag")
+    try:
+        open(flag, "w").close()
+    except OSError:
+        return
+    for _ in range(30):  # 최대 3초 기다림
+        h = ctypes.windll.kernel32.OpenMutexW(0x00100000, False, "TaskPetWidget")
+        if not h:
+            break
+        ctypes.windll.kernel32.CloseHandle(h)
+        time.sleep(0.1)
+    try:
+        os.remove(flag)
+    except OSError:
+        pass
+
+
+def copy_retry(src, dst):
+    """실행 중이던 옛 TaskPet이 완전히 꺼질 때까지 잠깐 기다리며 덮어쓴다."""
+    for _ in range(50):
+        try:
+            shutil.copy2(src, dst)
+            return
+        except PermissionError:
+            time.sleep(0.2)
+    shutil.copy2(src, dst)
+
+
+def install():
+    try:
+        _install()
+    except Exception as ex:
+        msgbox(("설치 중 오류가 났습니다:\n\n" if KO else "Install failed:\n\n")
+               + f"{type(ex).__name__}: {ex}", 0x10)
+
+
+def _install():
+    os.makedirs(INSTALL_DIR, exist_ok=True)
+    stop_running_widget(INSTALL_DIR)
+    exe = os.path.join(INSTALL_DIR, "TaskPet.exe")
+    copy_retry(sys.executable, exe)
+    hook = os.path.join(INSTALL_DIR, HOOK_EXE)
+    copy_retry(os.path.join(sys._MEIPASS, HOOK_EXE), hook)
+
+    result = install_claude_hooks(hook)
+
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+        winreg.SetValueEx(k, APP, 0, winreg.REG_SZ, f'"{exe}"')
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
+        for name, val in (("DisplayName", "TaskPet"),
+                          ("DisplayVersion", VERSION),
+                          ("Publisher", "TaskPet"),
+                          ("DisplayIcon", exe),
+                          ("InstallLocation", INSTALL_DIR),
+                          ("UninstallString", f'"{exe}" --uninstall')):
+            winreg.SetValueEx(k, name, 0, winreg.REG_SZ, val)
+        winreg.SetValueEx(k, "NoModify", 0, winreg.REG_DWORD, 1)
+        winreg.SetValueEx(k, "NoRepair", 0, winreg.REG_DWORD, 1)
+
+    if result == "bad":
+        msgbox(t("bad_settings"), 0x30)
+    subprocess.Popen([exe], cwd=INSTALL_DIR, creationflags=0x00000008)
+    msgbox(t("installed") + (t("no_claude") if result == "none" else ""))
+
+
+def uninstall(ask=True, from_widget=False):
+    if ask and msgbox(t("ask_uninstall"), 0x24) != 6:  # 6 = 예
+        return
+    if not from_widget:
+        stop_running_widget(INSTALL_DIR)
+    remove_claude_hooks()
+    for key, value in ((RUN_KEY, APP), (UNINSTALL_KEY, None)):
+        try:
+            if value:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0,
+                                    winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, value)
+            else:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+        except OSError:
+            pass
+    msgbox(t("uninstalled"))
+    # 실행 중인 자기 자신은 못 지우니, 끝난 뒤 지우도록 맡긴다
+    subprocess.Popen(
+        f'cmd /c ping -n 3 127.0.0.1 >nul & rmdir /s /q "{INSTALL_DIR}"',
+        creationflags=NO_WINDOW | 0x00000008, cwd=HOME)
+
+
+# ======================================================================
+# 대화 열기
+# ======================================================================
+def claude_local_id(sid):
+    """Claude 앱 로그에서 세션 ID → 앱 내부(local_) ID를 찾는다 (비공식)."""
+    found = None
+    for base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("APPDATA", "")):
+        for name in ("main.log.old", "main.log"):
+            p = os.path.join(base, "Claude", "logs", name)
+            try:
+                size = os.path.getsize(p)
+                with open(p, "rb") as f:
+                    f.seek(max(0, size - 8_000_000))
+                    text = f.read().decode("utf-8", "ignore")
+                for m in re.finditer(r"Mapping internal session (local_[A-Za-z0-9-]+)"
+                                     r" to CLI session " + re.escape(sid), text):
+                    found = m.group(1)
+            except OSError:
+                pass
+    return found
+
+
+def open_task(key, e):
+    if e.get("src") == "codex":
+        url = f"codex://threads/{e.get('id')}"
+    else:
+        lid = claude_local_id(e.get("id", ""))
+        url = (f"claude://code/continue?session={lid}" if lid
+               else "claude://code/continue?session=last")
+    try:
+        os.startfile(url)
+    except OSError:
+        pass
+
+
+# ======================================================================
+# 작업 상태 추적
+# ======================================================================
+def clean_prompt(p):
+    p = " ".join(str(p or "").split())
+    if p.startswith("<") or "system-reminder" in p:
+        return ""
+    return p[:80]
+
+
+def claude_title(d):
+    tp = d.get("transcript_path") or ""
+    sid = d.get("session_id") or ""
+    if not tp or not sid:
+        return ""
+    p = os.path.join(os.path.dirname(tp), sid, "custom-title.json")
+    return str(read_json(p, {}).get("customTitle", ""))[:60]
+
+
+class Tracker:
+    """Claude 훅 신호와 Codex 기록 파일을 읽어 작업 목록(self.tasks)을 만든다."""
+
+    def __init__(self, on_event):
+        saved = read_json(STATE, {})
+        self.tasks = saved.get("tasks", {})
+        self.ev_off = saved.get("events_offset", 0)
+        self.on_event = on_event          # (종류, 키) — 소리·말풍선용
+        self.codex_off = {}               # 파일 → 읽은 위치
+        self.codex_rest = {}              # 파일 → 덜 읽힌 줄 조각
+        self.codex_ignore = set()
+        self.codex_titles = {}
+        self.codex_index_mtime = 0
+        self.last_codex_scan = 0
+        self.dirty = False
+
+    def save(self):
+        if self.dirty:
+            self.dirty = False
+            try:
+                write_json(STATE, {"tasks": self.tasks,
+                                   "events_offset": self.ev_off})
+            except OSError:
+                pass
+
+    def prune(self):
+        now = time.time()
+        for k in list(self.tasks):
+            e = self.tasks[k]
+            if (now - e.get("start", now) > 12 * 3600
+                    or (e.get("status") == "done" and now - e.get("end", now) > 3600)):
+                del self.tasks[k]
+                self.dirty = True
+
+    def poll(self):
+        self.read_claude_events()
+        if time.time() - self.last_codex_scan > 1.5:
+            self.last_codex_scan = time.time()
+            self.scan_codex()
+        self.prune()
+        self.save()
+
+    # ---- Claude Code ----
+    def read_claude_events(self):
+        try:
+            size = os.path.getsize(EVENTS)
+        except OSError:
+            return
+        if size < self.ev_off:
+            self.ev_off = 0
+        if size > self.ev_off:
+            with open(EVENTS, "rb") as f:
+                f.seek(self.ev_off)
+                data = f.read()
+            end = data.rfind(b"\n") + 1
+            self.ev_off += end
+            self.dirty = True
+            for line in data[:end].splitlines():
+                try:
+                    self.claude_event(json.loads(line.decode("utf-8", "ignore")))
+                except Exception:
+                    pass
+        # 다 읽은 큰 파일은 비운다
+        if self.ev_off >= size > 512 * 1024:
+            old = EVENTS + ".old"
+            try:
+                os.replace(EVENTS, old)
+                with open(old, "rb") as f:
+                    f.seek(self.ev_off)
+                    rest = f.read()
+                self.ev_off = 0
+                for line in rest.splitlines():
+                    try:
+                        self.claude_event(json.loads(line.decode("utf-8", "ignore")))
+                    except Exception:
+                        pass
+                os.remove(old)
+            except OSError:
+                pass
+
+    def claude_event(self, rec):
+        ev, d = rec.get("ev"), rec.get("d") or {}
+        ts = rec.get("t", 0) / 1000
+        sid = d.get("session_id")
+        if not sid:
+            return
+        key = "c:" + sid
+        live = time.time() - ts < 30
+        e = self.tasks.get(key)
+        if ev == "start":
+            prompt = clean_prompt(d.get("prompt"))
+            if not prompt and e:
+                prompt = e.get("prompt", "")
+            self.tasks[key] = {
+                "src": "claude", "id": sid,
+                "title": claude_title(d) or (e or {}).get("title", ""),
+                "prompt": prompt,
+                "folder": os.path.basename(d.get("cwd", "")) or "Claude",
+                "transcript": d.get("transcript_path", ""),
+                "start": ts, "status": "working",
+            }
+            if live:
+                self.on_event("start", key)
+        elif ev == "wait":
+            msg = str(d.get("message", ""))
+            if "waiting for your input" in msg:   # 대답 후 한가할 때 오는 알림
+                return
+            if e and e.get("status") == "working":
+                e["status"] = "waiting"
+                e["wait_start"] = ts
+                if live:
+                    self.on_event("wait", key)
+        elif ev == "resume":
+            if e and e.get("status") == "waiting":
+                e["status"] = "working"
+                e.pop("wait_start", None)
+        elif ev == "stop":
+            if e and e.get("status") in ("working", "waiting"):
+                e["status"] = "done"
+                e["end"] = ts
+                e.pop("wait_start", None)
+                e["title"] = claude_title(d) or e.get("title", "")
+                if live:
+                    self.on_event("done", key)
+        elif ev == "end":
+            self.tasks.pop(key, None)
+        self.dirty = True
+
+    def refresh_claude_titles(self):
+        for e in self.tasks.values():
+            if e.get("src") == "claude" and not e.get("title") and e.get("transcript"):
+                title = claude_title({"transcript_path": e["transcript"],
+                                      "session_id": e["id"]})
+                if title:
+                    e["title"] = title
+                    self.dirty = True
+
+    # ---- Codex ----
+    def load_codex_titles(self):
+        p = os.path.join(CODEX_DIR, "session_index.jsonl")
+        try:
+            m = os.path.getmtime(p)
+        except OSError:
+            return
+        if m == self.codex_index_mtime:
+            return
+        self.codex_index_mtime = m
+        with open(p, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                    if d.get("thread_name"):
+                        self.codex_titles[d["id"]] = d["thread_name"]
+                except Exception:
+                    pass
+        for k, e in self.tasks.items():
+            if e.get("src") == "codex":
+                title = self.codex_titles.get(e["id"])
+                if title and title != e.get("title"):
+                    e["title"] = title
+                    self.dirty = True
+
+    def scan_codex(self):
+        base = os.path.join(CODEX_DIR, "sessions")
+        if not os.path.isdir(base):
+            return
+        self.load_codex_titles()
+        now = time.time()
+        files = []
+        for days in (0, 1):
+            d = datetime.now() - timedelta(days=days)
+            files += glob.glob(os.path.join(base, d.strftime("%Y"), d.strftime("%m"),
+                                            d.strftime("%d"), "*.jsonl"))
+        for f in files:
+            if f in self.codex_ignore:
+                continue
+            try:
+                size = os.path.getsize(f)
+                if now - os.path.getmtime(f) > 12 * 3600:
+                    continue
+            except OSError:
+                continue
+            first = f not in self.codex_off
+            off = self.codex_off.get(f, 0)
+            if size <= off:
+                continue
+            with open(f, "rb") as fh:
+                fh.seek(off)
+                data = self.codex_rest.pop(f, b"") + fh.read()
+            self.codex_off[f] = size
+            end = data.rfind(b"\n") + 1
+            if end < len(data):
+                self.codex_rest[f] = data[end:]
+            m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+                          r"\.jsonl$", f)
+            tid = m.group(1) if m else os.path.basename(f)
+            for line in data[:end].splitlines():
+                try:
+                    rec = json.loads(line.decode("utf-8", "ignore"))
+                except Exception:
+                    continue
+                if not self.codex_record(f, tid, rec, live=not first):
+                    break
+
+    def codex_record(self, f, tid, rec, live):
+        typ = rec.get("type")
+        p = rec.get("payload") or {}
+        key = "x:" + tid
+        if typ == "session_meta":
+            if p.get("thread_source") not in (None, "user"):   # 하위 에이전트는 제외
+                self.codex_ignore.add(f)
+                self.tasks.pop(key, None)
+                return False
+            return True
+        if typ != "event_msg":
+            return True
+        kind = p.get("type")
+        try:
+            ts = datetime.fromisoformat(
+                rec.get("timestamp", "").replace("Z", "+00:00")).timestamp()
+        except Exception:
+            ts = time.time()
+        e = self.tasks.get(key)
+        if kind == "task_started":
+            self.tasks[key] = {
+                "src": "codex", "id": tid,
+                "title": self.codex_titles.get(tid, ""),
+                "prompt": "", "folder": "Codex",
+                "start": ts, "status": "working",
+            }
+            if live:
+                self.on_event("start", key)
+        elif kind == "task_complete" and e and e.get("status") == "working":
+            e["status"] = "done"
+            e["end"] = ts
+            if live:
+                self.on_event("done", key)
+        elif kind == "turn_aborted":
+            self.tasks.pop(key, None)
+        else:
+            return True
+        self.dirty = True
+        return True
+
+
+# ======================================================================
+# 화면
+# ======================================================================
+class Pet:
+    def __init__(self):
+        global DPI
+        self.root = tk.Tk()
+        DPI = self.root.winfo_fpixels("1i") / 96.0
+        self.root.title(APP)
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.configure(bg=KEY)
+        self.root.attributes("-transparentcolor", KEY)
+
+        self.px = S(5)
+        self.pad_x, self.pad_y = S(5), S(12)
+        self.cw = 15 * self.px + self.pad_x * 2
+        self.ch = 16 * self.px + self.pad_y + S(4)
+        self.canvas = tk.Canvas(self.root, width=self.cw, height=self.ch,
+                                bg=KEY, highlightthickness=0)
+        self.canvas.pack()
+
+        self.tick_n = 0
+        self.happy_until = 0.0
+        self.hidden = False
+        self._press = None
+        self._last_click = ("", 0.0)
+        self._bub_sig = None
+        self._pos_sig = None
+        self._infos = []
+
+        self.bubble = tk.Toplevel(self.root)
+        self.bubble.overrideredirect(True)
+        self.bubble.attributes("-topmost", True)
+        self.bubble.configure(bg=KEY)
+        self.bubble.attributes("-transparentcolor", KEY)
+        self.bub_c = tk.Canvas(self.bubble, bg=KEY, highlightthickness=0)
+        self.bub_c.pack()
+        self.bub_box = tk.Frame(self.bub_c, bg=INNER)
+        self.bub_c.create_window(0, 0, window=self.bub_box, anchor="nw",
+                                 tags="boxwin")
+        self.bubble.withdraw()
+
+        self.tracker = Tracker(self.on_event)
+
+        self.canvas.bind("<ButtonPress-1>", self.press)
+        self.canvas.bind("<B1-Motion>", self.drag)
+        self.canvas.bind("<ButtonRelease-1>", self.release)
+        self.canvas.bind("<Button-3>", self.menu)
+
+        l, t_, r, b = work_area()
+        self.root.geometry(f"{self.cw}x{self.ch}+{r - self.cw - S(260)}+{b - self.ch - S(10)}")
+        self.tick()
+        self.root.mainloop()
+
+    # ---- 신호 ----
+    def on_event(self, kind, key):
+        self.hidden = False
+        if kind == "done":
+            self.happy_until = time.time() + 8
+            play("done")
+        elif kind == "wait":
+            play("wait")
+
+    # ---- 마우스 ----
+    def press(self, e):
+        self._press = (e.x_root, e.y_root, self.root.winfo_x(), self.root.winfo_y(), False)
+
+    def drag(self, e):
+        if not self._press:
+            return
+        x0, y0, wx, wy, _ = self._press
+        dx, dy = e.x_root - x0, e.y_root - y0
+        if abs(dx) > 6 or abs(dy) > 6:
+            self._press = (x0, y0, wx, wy, True)
+            self.root.geometry(f"+{wx + dx}+{wy + dy}")
+            self.position_bubble()
+
+    def release(self, e):
+        moved = self._press[4] if self._press else False
+        self._press = None
+        if not moved:
+            self.hidden = not self.hidden
+            if not self.hidden:
+                self.happy_until = 0.0
+            self.update_bubble(force=True)
+
+    def menu(self, e):
+        m = tk.Menu(self.root, tearoff=0, bg=INNER, fg=FG,
+                    activebackground=ACCENT, activeforeground="#1b1c20")
+        m.add_command(label=t("clear"), command=self.clear_done)
+        m.add_separator()
+        m.add_command(label=t("uninstall"), command=self.do_uninstall)
+        m.add_command(label=t("quit"), command=self.root.destroy)
+        m.tk_popup(e.x_root, e.y_root)
+
+    def do_uninstall(self):
+        if msgbox(t("ask_uninstall"), 0x24) == 6:
+            self.root.destroy()
+            uninstall(ask=False, from_widget=True)
+
+    def clear_done(self):
+        tasks = self.tracker.tasks
+        for k in [k for k, e in tasks.items() if e.get("status") == "done"]:
+            del tasks[k]
+        self.tracker.dirty = True
+        self.update_bubble(force=True)
+
+    def dismiss(self, key):
+        self.tracker.tasks.pop(key, None)
+        self.tracker.dirty = True
+        self.update_bubble(force=True)
+
+    def row_click(self, key):
+        now = time.time()
+        last, when = self._last_click
+        if key == last and now - when < 0.5:
+            self._last_click = ("", 0.0)
+            e = self.tracker.tasks.get(key)
+            if e:
+                open_task(key, e)
+        else:
+            self._last_click = (key, now)
+
+    # ---- 반복 ----
+    def tick(self):
+        if os.path.exists(QUIT_FLAG):
+            self.root.destroy()
+            return
+        self.tick_n += 1
+        if self.tick_n % 2 == 1:
+            self.tracker.poll()
+            if self.tick_n % 10 == 1:
+                self.tracker.refresh_claude_titles()
+            self.update_bubble()
+        self.draw()
+        self.root.after(400, self.tick)
+
+    def mode(self):
+        st = [e.get("status") for e in self.tracker.tasks.values()]
+        if "waiting" in st:
+            return "alert"
+        if "working" in st:
+            return "work"
+        if time.time() < self.happy_until:
+            return "happy"
+        return "idle"
+
+    def draw(self):
+        c = self.canvas
+        c.delete("all")
+        mode = self.mode()
+        if mode == "work":
+            grid = WORK_A if self.tick_n % 2 == 0 else WORK_B
+        elif mode == "idle":
+            grid = BLINK if random.random() < 0.12 else IDLE
+        else:
+            grid = IDLE
+        bounce = -S(2) if (mode != "idle" and self.tick_n % 2 == 0) else 0
+        px = self.px
+        for ry, row in enumerate(grid):
+            for rx, ch in enumerate(row):
+                if ch == ".":
+                    continue
+                color = EYE[mode] if ch == "E" else PALETTE[ch]
+                x = self.pad_x + rx * px
+                y = self.pad_y + ry * px + bounce
+                c.create_rectangle(x, y, x + px, y + px, fill=color, width=0)
+
+        st = [e.get("status") for e in self.tracker.tasks.values()]
+        n = st.count("working")
+        badge = None
+        if "waiting" in st:
+            badge = (RED, "!")
+        elif n:
+            badge = (ACCENT, str(n))
+        elif "done" in st:
+            badge = (GREEN, "✓")
+        if badge:
+            d = S(16)
+            x, y = self.cw - d, S(4)
+            c.create_oval(x, y, x + d, y + d, fill=badge[0], width=0)
+            c.create_text(x + d / 2, y + d / 2, text=badge[1], fill="#1b1c20",
+                          font=(FONT, 8, "bold"))
+
+    # ---- 말풍선 ----
+    @staticmethod
+    def info_text(e, now):
+        src = "Codex" if e.get("src") == "codex" else "Claude"
+        if e.get("status") == "done":
+            when = time.strftime("%H:%M", time.localtime(e.get("end", now)))
+            body = t("done", w=when, d=fmt_dur(e.get("end", now) - e.get("start", now)))
+        elif e.get("status") == "waiting":
+            body = t("waiting", d=fmt_dur(now - e.get("wait_start", now)))
+        else:
+            body = t("working", d=fmt_dur(now - e.get("start", now)))
+        return f"  {src} · {body}"
+
+    def update_bubble(self, force=False):
+        order = {"waiting": 0, "working": 1, "done": 2}
+        items = sorted(self.tracker.tasks.items(),
+                       key=lambda kv: (order.get(kv[1].get("status"), 3),
+                                       -kv[1].get("start", 0)))
+        if not items or self.hidden:
+            self.bubble.withdraw()
+            self._bub_sig = None
+            return
+        shown = items[:8]
+        compact = len(items) >= 4
+        now = time.time()
+
+        sig = (compact, len(items) > 8, tuple(
+            (k, e.get("status"), e.get("title", ""),
+             "" if compact else e.get("prompt", "")) for k, e in shown))
+        if not force and sig == self._bub_sig:
+            for k, lbl in self._infos:     # 시간 글자만 바꿔 깜빡임 방지
+                e = self.tracker.tasks.get(k)
+                if e:
+                    lbl.configure(text=self.info_text(e, now))
+            self.show_bubble()
+            return
+        self._bub_sig = sig
+        self._infos = []
+        for w in self.bub_box.winfo_children():
+            w.destroy()
+
+        for key, e in shown:
+            status = e.get("status")
+            color = {"done": GREEN, "waiting": RED}.get(status, ACCENT)
+            icon = {"done": "✅ ", "waiting": "❗ "}.get(status, "⚙ ")
+            row = tk.Frame(self.bub_box, bg=INNER)
+            row.pack(fill="x", padx=S(2), pady=S(2) if compact else S(3))
+            top = tk.Frame(row, bg=INNER)
+            top.pack(fill="x")
+            name = e.get("title") or e.get("prompt") or e.get("folder", "?")
+            head = tk.Label(top, text=icon + name[:28], bg=INNER, fg=color,
+                            font=(FONT, 9, "bold"))
+            head.pack(side="left")
+            info = tk.Label(top, text=self.info_text(e, now), bg=INNER,
+                            fg=RED if status == "waiting" else SUB,
+                            font=(FONT, 8, "bold" if status == "waiting" else "normal"))
+            info.pack(side="left")
+            self._infos.append((key, info))
+            x = tk.Label(top, text=" ✕", bg=INNER, fg=SUB, font=(FONT, 9),
+                         cursor="hand2")
+            x.pack(side="right")
+            x.bind("<Button-1>", lambda ev, k=key: self.dismiss(k))
+            widgets = [row, top, head, info]
+            prompt = e.get("prompt")
+            if (not compact and status != "waiting" and prompt
+                    and e.get("title") and prompt != e.get("title")):
+                p = tk.Label(row, text=prompt[:60], bg=INNER, fg=FG, font=(FONT, 8),
+                             anchor="w", wraplength=S(220), justify="left")
+                p.pack(fill="x")
+                widgets.append(p)
+            for w in widgets:
+                w.bind("<Button-1>", lambda ev, k=key: self.row_click(k))
+                w.configure(cursor="hand2")
+        if len(items) > 8:
+            tk.Label(self.bub_box, text=t("more", n=len(items) - 8), bg=INNER,
+                     fg=SUB, font=(FONT, 8)).pack(anchor="w", padx=S(2))
+        self.show_bubble()
+
+    def show_bubble(self):
+        if self.bubble.state() == "withdrawn":
+            self.bubble.deiconify()
+        self.position_bubble()
+
+    def bubble_image(self, bw, bh, rect_w, rect_h, ty):
+        """4배로 크게 그린 뒤 줄여서 모서리를 매끈하게."""
+        k = 4
+        img = Image.new("RGBA", (bw * k, bh * k), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        o = S(2)
+        d.rounded_rectangle([o * k, o * k, (o + rect_w) * k, (o + rect_h) * k],
+                            radius=S(22) * k, fill=INNER, outline=BORDER, width=S(2) * k)
+        bx = (o + rect_w) * k - S(2) * k
+        tw = S(13)
+        d.polygon([(bx, ty * k), ((rect_w + o + tw) * k, (ty + S(8)) * k),
+                   (bx, (ty + S(16)) * k)], fill=BORDER)
+        d.polygon([(bx - k, (ty + S(3)) * k), ((rect_w + o + tw - S(5)) * k, (ty + S(8)) * k),
+                   (bx - k, (ty + S(13)) * k)], fill=INNER)
+        bg = Image.new("RGB", img.size, KEY)
+        bg.paste(img, mask=img.getchannel("A"))
+        return ImageTk.PhotoImage(bg.resize((bw, bh), Image.LANCZOS))
+
+    def position_bubble(self):
+        if self.hidden or self.bubble.state() == "withdrawn":
+            return
+        self.bub_box.update_idletasks()
+        pad = S(13)
+        rect_w = self.bub_box.winfo_reqwidth() + pad * 2
+        rect_h = self.bub_box.winfo_reqheight() + pad * 2
+        bw = rect_w + S(16)
+        bh = max(rect_h + S(4), S(44))
+        l, t_, r, b = work_area()
+        rx, ry = self.root.winfo_x(), self.root.winfo_y()
+        x = max(l + 4, rx - bw - S(2))
+        y = max(t_ + 4, min(ry + self.ch - bh - S(24), b - bh - 4))
+        ty = max(S(12), min(ry + S(30) - y, bh - S(28)))
+        sig = (bw, bh, x, y, ty)
+        if sig == self._pos_sig:
+            return
+        self._pos_sig = sig
+        c = self.bub_c
+        c.configure(width=bw, height=bh)
+        if (bw, bh, rect_w, rect_h, ty) != getattr(self, "_img_sig", None):
+            self._img_sig = (bw, bh, rect_w, rect_h, ty)
+            self._img = self.bubble_image(bw, bh, rect_w, rect_h, ty)
+        c.delete("bg")
+        c.create_image(0, 0, anchor="nw", image=self._img, tags="bg")
+        c.coords("boxwin", S(2) + pad, S(2) + pad)
+        c.tag_raise("boxwin")
+        self.bubble.geometry(f"{bw}x{bh}+{x}+{y}")
+
+
+def main():
+    if "--uninstall" in sys.argv:
+        uninstall()
+        return
+    if FROZEN and os.path.normcase(APP_DIR) != os.path.normcase(INSTALL_DIR):
+        install()
+        return
+    ctypes.windll.kernel32.CreateMutexW(None, False, "TaskPetWidget")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # 이미 실행 중
+        return
+    make_sounds()
+    Pet()
+
+
+if __name__ == "__main__":
+    main()
