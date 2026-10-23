@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -47,6 +47,7 @@ KO = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0xFF == 0x12
 T = {
     "working": ("{d} 진행 중", "working {d}"),
     "waiting": ("응답 대기 {d}째", "waiting for you {d}"),
+    "bg": ("백그라운드 {n}개 기다리는 중 · {d}", "{n} background task(s) · {d}"),
     "done": ("완료 {w} · {d}", "done {w} · {d}"),
     "more": ("… 외 {n}개", "… {n} more"),
     "clear": ("완료 기록 모두 지우기", "Clear finished"),
@@ -54,6 +55,7 @@ T = {
     "uninstall": ("TaskPet 제거", "Uninstall TaskPet"),
     "installed": ("TaskPet 설치 완료!\n\n화면 오른쪽 아래 주황 로봇이 Claude Code와 Codex 작업을 알려 줍니다.\n\n· 이미 열려 있던 Claude Code 세션은 새로 시작해야 잡힙니다.\n· 로봇 클릭 = 말풍선 숨기기, 줄 더블 클릭 = 그 대화 열기, 우클릭 = 메뉴",
                   "TaskPet installed!\n\nThe orange robot at the bottom right shows your Claude Code and Codex tasks.\n\n· Claude Code sessions that were already open need to be restarted.\n· Click robot = hide bubble, double-click a row = open that chat, right-click = menu"),
+    "updated": ("TaskPet을 새 버전으로 업데이트했습니다.", "TaskPet has been updated."),
     "no_claude": ("\n\n(Claude Code 설정을 찾지 못해 Codex만 연결했습니다.)",
                   "\n\n(Claude Code settings not found, only Codex is connected.)"),
     "bad_settings": ("~/.claude/settings.json 을 읽을 수 없어 Claude Code 연결을 건너뛰었습니다. 파일 형식을 확인해 주세요.",
@@ -223,6 +225,29 @@ HOOK_EVENTS = {
 }
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\TaskPet"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+# 레지스트리 Run에 넣으면 로그온 때 건너뛰는 PC가 있어서(시작 앱 승인 기록이 없으면 무시됨)
+# 시작 프로그램 폴더 바로가기로 자동 실행한다.
+STARTUP_LNK = os.path.join(os.environ.get("APPDATA", HOME), "Microsoft", "Windows",
+                           "Start Menu", "Programs", "Startup", "TaskPet.lnk")
+
+
+def make_startup_shortcut(exe):
+    script = ("$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:TP_LNK);"
+              "$s.TargetPath=$env:TP_EXE;$s.WorkingDirectory=$env:TP_DIR;"
+              "$s.Description='TaskPet';$s.Save()")
+    env = dict(os.environ, TP_LNK=STARTUP_LNK, TP_EXE=exe, TP_DIR=os.path.dirname(exe))
+    os.makedirs(os.path.dirname(STARTUP_LNK), exist_ok=True)
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                   env=env, creationflags=NO_WINDOW, timeout=30)
+    return os.path.exists(STARTUP_LNK)
+
+
+def remove_run_value():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, APP)
+    except OSError:
+        pass
 
 
 def is_ours(hook):
@@ -336,14 +361,15 @@ def _install():
     os.makedirs(INSTALL_DIR, exist_ok=True)
     stop_running_widget(INSTALL_DIR)
     exe = os.path.join(INSTALL_DIR, "TaskPet.exe")
+    updating = os.path.exists(exe)
     copy_retry(sys.executable, exe)
     hook = os.path.join(INSTALL_DIR, HOOK_EXE)
     copy_retry(os.path.join(sys._MEIPASS, HOOK_EXE), hook)
 
     result = install_claude_hooks(hook)
 
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
-        winreg.SetValueEx(k, APP, 0, winreg.REG_SZ, f'"{exe}"')
+    remove_run_value()             # 1.0.0이 넣었던 Run 등록은 치운다
+    make_startup_shortcut(exe)
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
         for name, val in (("DisplayName", "TaskPet"),
                           ("DisplayVersion", VERSION),
@@ -358,7 +384,10 @@ def _install():
     if result == "bad":
         msgbox(t("bad_settings"), 0x30)
     subprocess.Popen([exe], cwd=INSTALL_DIR, creationflags=0x00000008)
-    msgbox(t("installed") + (t("no_claude") if result == "none" else ""))
+    if updating:
+        msgbox(t("updated"))
+    else:
+        msgbox(t("installed") + (t("no_claude") if result == "none" else ""))
 
 
 def uninstall(ask=True, from_widget=False):
@@ -367,16 +396,15 @@ def uninstall(ask=True, from_widget=False):
     if not from_widget:
         stop_running_widget(INSTALL_DIR)
     remove_claude_hooks()
-    for key, value in ((RUN_KEY, APP), (UNINSTALL_KEY, None)):
-        try:
-            if value:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0,
-                                    winreg.KEY_SET_VALUE) as k:
-                    winreg.DeleteValue(k, value)
-            else:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
-        except OSError:
-            pass
+    remove_run_value()
+    try:
+        os.remove(STARTUP_LNK)
+    except OSError:
+        pass
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
+    except OSError:
+        pass
     msgbox(t("uninstalled"))
     # 실행 중인 자기 자신은 못 지우니, 끝난 뒤 지우도록 맡긴다
     subprocess.Popen(
@@ -427,6 +455,65 @@ def clean_prompt(p):
     if p.startswith("<") or "system-reminder" in p:
         return ""
     return p[:80]
+
+
+BG_START = re.compile(rb"Command running in background with ID: ([A-Za-z0-9]+)"
+                      rb"|Async agent launched successfully[^\"]{0,200}?agentId: ([A-Za-z0-9]+)")
+BG_END = re.compile(rb"<task-notification>(?:\\n|\s)*<task-id>([A-Za-z0-9]+)</task-id>")
+BG_TS = re.compile(rb'"timestamp":\s*"([0-9T:.\-]+)')
+BG_WINDOW = 2 * 3600   # 이보다 오래전에 시작한 건 앱 재시작 등으로 사라진 것으로 본다
+
+
+def claude_bg_pending(transcript):
+    """대화 기록에서 아직 끝나지 않은 최근 백그라운드 작업 수를 센다.
+    Claude는 백그라운드 작업이 남아 있으면 그게 끝날 때 저절로 다시 일을 시작하므로,
+    그 사이에 끝난 턴은 '완료'가 아니다."""
+    started, ended = {}, set()
+    now = time.time()
+    try:
+        with open(transcript, "rb") as f:
+            for line in f:
+                if b"<task-notification>" in line:
+                    ended.update(m.decode() for m in BG_END.findall(line))
+                if b"background with ID" in line or b"Async agent launched" in line:
+                    m = BG_TS.search(line)
+                    try:
+                        ts = datetime.fromisoformat(m.group(1).decode() + "+00:00").timestamp()
+                    except Exception:
+                        continue   # 시각을 모르면 옛 기록으로 보고 세지 않는다
+                    for a, b in BG_START.findall(line):
+                        started[(a or b).decode()] = ts
+    except OSError:
+        return 0
+    return sum(1 for k, ts in started.items() if k not in ended and now - ts < BG_WINDOW)
+
+
+def claude_turn_asks(transcript, since):
+    """이번 턴이 사용자에게 질문(데스크톱 앱 아래 상자의 선택 버튼)을 남기고 끝났는지 본다.
+    이때는 Claude Code가 승인 대기 신호를 보내지 않으므로 기록을 직접 읽는다."""
+    try:
+        size = os.path.getsize(transcript)
+        with open(transcript, "rb") as f:
+            f.seek(max(0, size - 600_000))
+            tail = f.read()
+    except OSError:
+        return False
+    for line in reversed(tail.splitlines()):
+        if b'"mcp__ccd_turn__wrap_up"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+            ts = datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if ts < since - 2:
+            return False          # 이번 턴 전에 한 것
+        for part in (rec.get("message") or {}).get("content") or []:
+            if (isinstance(part, dict) and part.get("name") == "mcp__ccd_turn__wrap_up"
+                    and str((part.get("input") or {}).get("ask") or "").strip()):
+                return True
+        return False
+    return False
 
 
 def claude_title(d):
@@ -545,29 +632,80 @@ class Tracker:
             msg = str(d.get("message", ""))
             if "waiting for your input" in msg:   # 대답 후 한가할 때 오는 알림
                 return
+            if live and (e is None or e.get("status") == "done"):
+                e = self.tasks[key] = {
+                    "src": "claude", "id": sid,
+                    "title": claude_title(d) or (e or {}).get("title", ""),
+                    "prompt": (e or {}).get("prompt", ""),
+                    "folder": os.path.basename(d.get("cwd", "")) or "Claude",
+                    "transcript": d.get("transcript_path", ""),
+                    "start": ts, "status": "working",
+                }
             if e and e.get("status") == "working":
                 e["status"] = "waiting"
                 e["wait_start"] = ts
                 if live:
                     self.on_event("wait", key)
         elif ev == "resume":
-            if e and e.get("status") == "waiting":
+            if e is None or e.get("status") == "done":
+                # 지웠거나 끝난 세션이 저절로 다시 일을 시작함 (백그라운드 작업이 끝나서 등)
+                if not live:
+                    return
+                self.tasks[key] = {
+                    "src": "claude", "id": sid,
+                    "title": claude_title(d) or (e or {}).get("title", ""),
+                    "prompt": (e or {}).get("prompt", ""),
+                    "folder": os.path.basename(d.get("cwd", "")) or "Claude",
+                    "transcript": d.get("transcript_path", ""),
+                    "start": ts, "status": "working",
+                }
+                self.on_event("start", key)
+            elif e.get("status") == "waiting":
                 e["status"] = "working"
                 e.pop("wait_start", None)
         elif ev == "stop":
             if e and e.get("status") in ("working", "waiting"):
-                e["status"] = "done"
-                e["end"] = ts
                 e.pop("wait_start", None)
                 e["title"] = claude_title(d) or e.get("title", "")
-                if live:
-                    self.on_event("done", key)
+                tp = d.get("transcript_path") or e.get("transcript", "")
+                bg = claude_bg_pending(tp) if live else 0
+                if live and claude_turn_asks(tp, e.get("start", ts)):
+                    e["status"] = "waiting"   # 답을 기다리며 멈춤
+                    e["wait_start"] = ts
+                    e.pop("bg", None)
+                    self.on_event("wait", key)
+                elif bg:
+                    e["status"] = "working"   # 백그라운드가 끝나면 다시 이어서 하므로 아직 완료 아님
+                    e["bg"] = bg
+                else:
+                    e["status"] = "done"
+                    e["end"] = ts
+                    e.pop("bg", None)
+                    if live:
+                        self.on_event("done", key)
         elif ev == "end":
-            self.tasks.pop(key, None)
+            # 앱이 쉬는 세션을 닫기만 한 것일 수 있으니 줄은 남긴다 (질문 대기는 그대로)
+            if e and e.get("status") == "working":
+                e["status"] = "done"
+                e["end"] = ts
+                e.pop("bg", None)
         self.dirty = True
 
     def refresh_claude_titles(self):
-        for e in self.tasks.values():
+        for key, e in self.tasks.items():
+            # '백그라운드 기다리는 중'이 실제로는 끝나 있고 질문으로 멈춘 상태면 바로잡는다
+            if e.get("src") == "claude" and e.get("bg") and e.get("transcript"):
+                bg = claude_bg_pending(e["transcript"])
+                if bg != e["bg"]:
+                    self.dirty = True
+                    if bg:
+                        e["bg"] = bg
+                    else:
+                        e.pop("bg", None)
+                        if claude_turn_asks(e["transcript"], e.get("start", 0)):
+                            e["status"] = "waiting"
+                            e["wait_start"] = time.time()
+                            self.on_event("wait", key)
             if e.get("src") == "claude" and not e.get("title") and e.get("transcript"):
                 title = claude_title({"transcript_path": e["transcript"],
                                       "session_id": e["id"]})
@@ -877,6 +1015,8 @@ class Pet:
             body = t("done", w=when, d=fmt_dur(e.get("end", now) - e.get("start", now)))
         elif e.get("status") == "waiting":
             body = t("waiting", d=fmt_dur(now - e.get("wait_start", now)))
+        elif e.get("bg"):
+            body = t("bg", n=e["bg"], d=fmt_dur(now - e.get("start", now)))
         else:
             body = t("working", d=fmt_dur(now - e.get("start", now)))
         return f"  {src} · {body}"
