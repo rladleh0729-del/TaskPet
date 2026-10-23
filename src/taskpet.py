@@ -29,10 +29,11 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
+GPT_EXE = "taskpet-chatgpt.exe"
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 EVENTS = os.path.join(APP_DIR, "events.jsonl")
@@ -96,7 +97,8 @@ ACCENT = "#f5942b"
 GREEN = "#4cc46a"
 RED = "#ff6b6b"
 BLUE = "#4ea1ff"
-SRC_COLOR = {"claude": ACCENT, "codex": BLUE}   # 어느 도구의 대화인지 (Claude 주황, Codex 파랑)
+SRC_COLOR = {"claude": ACCENT, "codex": BLUE, "chatgpt": BLUE}   # Claude 주황, GPT 쪽 파랑
+SRC_LABEL = {"claude": "Claude", "codex": "Codex", "chatgpt": "ChatGPT"}
 FONT = "맑은 고딕" if KO else "Segoe UI"
 
 # ---- 픽셀 로봇 (15 x 16) ----
@@ -367,6 +369,7 @@ def _install():
     copy_retry(sys.executable, exe)
     hook = os.path.join(INSTALL_DIR, HOOK_EXE)
     copy_retry(os.path.join(sys._MEIPASS, HOOK_EXE), hook)
+    copy_retry(os.path.join(sys._MEIPASS, GPT_EXE), os.path.join(INSTALL_DIR, GPT_EXE))
 
     result = install_claude_hooks(hook)
 
@@ -436,7 +439,65 @@ def claude_local_id(sid):
     return found
 
 
+class ChatGptWatcher:
+    """taskpet-chatgpt.exe를 띄워 두고, ChatGPT 창에서 '작업 중'인 대화 제목 목록을 받는다.
+    일반 채팅은 컴퓨터에 기록이 남지 않아 창을 화면 읽기 기능으로 읽는 수밖에 없다."""
+
+    def __init__(self):
+        self.report = None        # 가장 최근 {"ok", "hwnd", "working"}
+        self.fresh = False
+        self.proc = None
+        exe = next((p for p in (os.path.join(APP_DIR, GPT_EXE),
+                                os.path.join(APP_DIR, "..", "build", GPT_EXE))
+                    if os.path.exists(p)), None)
+        if not exe:
+            return
+        try:
+            self.proc = subprocess.Popen(
+                [exe, str(os.getpid())], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
+        except OSError:
+            return
+        import threading
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        for line in self.proc.stdout:
+            try:
+                self.report = json.loads(line.decode("utf-8", "ignore"))
+                self.fresh = True
+            except Exception:
+                pass
+
+    def take(self):
+        if not self.fresh:
+            return None
+        self.fresh = False
+        return self.report
+
+    def open(self, title):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.write(("open\t" + title + "\n").encode("utf-8"))
+                self.proc.stdin.flush()
+            except OSError:
+                pass
+        hwnd = (self.report or {}).get("hwnd") or 0
+        if hwnd:   # 로봇을 방금 누른 참이라 창을 앞으로 가져올 수 있다
+            u = ctypes.windll.user32
+            if u.IsIconic(hwnd):
+                u.ShowWindow(hwnd, 9)
+            u.SetForegroundWindow(hwnd)
+
+
+GPT = None   # Pet이 띄운 ChatGptWatcher
+
+
 def open_task(key, e):
+    if e.get("src") == "chatgpt":
+        if GPT:
+            GPT.open(e.get("title", ""))
+        return
     if e.get("src") == "codex":
         url = f"codex://threads/{e.get('id')}"
     else:
@@ -545,6 +606,7 @@ class Tracker:
         self.codex_titles = {}
         self.codex_index_mtime = 0
         self.last_codex_scan = 0
+        self.gpt_working = None           # 직전에 '작업 중'이던 일반 채팅 제목들 (처음엔 모름)
         self.dirty = False
 
     def save(self):
@@ -573,6 +635,56 @@ class Tracker:
             self.scan_codex()
         self.prune()
         self.save()
+
+    # ---- 일반 ChatGPT 채팅 (창 화면 읽기) ----
+    def codex_title_set(self):
+        s = set(self.codex_titles.values())
+        s.update(e.get("title", "") for e in self.tasks.values() if e.get("src") == "codex")
+        s.discard("")
+        return s
+
+    def apply_chatgpt(self, report):
+        """감시 프로그램이 보낸 '작업 중' 제목 목록으로 일반 채팅의 시작·완료를 정한다."""
+        if not report or not report.get("ok"):
+            return          # ChatGPT 창이 없으면 판단을 미룬다
+        now = time.time()
+        codex = self.codex_title_set()
+        cur = {t for t in report.get("working") or [] if t and t not in codex}
+        first = self.gpt_working is None
+        prev = set() if first else self.gpt_working
+        # Codex 대화로 밝혀진 줄은 일반 채팅 목록에서 뺀다 (Codex는 기록 파일로 따로 잡음)
+        for k in [k for k, e in self.tasks.items()
+                  if e.get("src") == "chatgpt" and e.get("title") in codex]:
+            del self.tasks[k]
+            self.dirty = True
+        added, removed = cur - prev, prev - cur
+        # 답하는 도중 제목이 바뀌면(새 채팅 → 자동 제목) 같은 대화로 잇는다
+        if len(added) == 1 and len(removed) == 1:
+            old, new = "g:" + next(iter(removed)), "g:" + next(iter(added))
+            e = self.tasks.pop(old, None)
+            if e and e.get("status") == "working":
+                e["title"] = new[2:]
+                self.tasks[new] = e
+                added, removed = set(), set()
+                self.dirty = True
+        for t in added:
+            key = "g:" + t
+            e = self.tasks.get(key)
+            if e and e.get("status") == "working":
+                continue
+            self.tasks[key] = {"src": "chatgpt", "id": t, "title": t, "prompt": "",
+                               "folder": "ChatGPT", "start": now, "status": "working"}
+            self.dirty = True
+            if not first:
+                self.on_event("start", key)
+        for k, e in self.tasks.items():
+            if e.get("src") == "chatgpt" and e.get("status") == "working" and e["title"] not in cur:
+                e["status"] = "done"     # 로봇을 다시 켰을 때 이미 끝나 있던 것도 여기서 정리
+                e["end"] = now
+                self.dirty = True
+                if not first:
+                    self.on_event("done", k)
+        self.gpt_working = cur
 
     # ---- Claude Code ----
     def read_claude_events(self):
@@ -922,6 +1034,8 @@ class Pet:
         self.bubble.withdraw()
 
         self.tracker = Tracker(self.on_event)
+        global GPT
+        GPT = ChatGptWatcher()
 
         self.canvas.bind("<ButtonPress-1>", self.press)
         self.canvas.bind("<B1-Motion>", self.drag)
@@ -1011,6 +1125,9 @@ class Pet:
             return
         self.tick_n += 1
         if self.tick_n % 2 == 1:
+            rep = GPT.take() if GPT else None
+            if rep:
+                self.tracker.apply_chatgpt(rep)
             self.tracker.poll()
             if self.tick_n % 10 == 1:
                 self.tracker.refresh_claude_titles()
@@ -1057,7 +1174,7 @@ class Pet:
         elif n:
             srcs = {e.get("src") for e in self.tracker.tasks.values()
                     if e.get("status") == "working"}
-            badge = (BLUE if srcs == {"codex"} else ACCENT, str(n))
+            badge = (BLUE if srcs and srcs <= {"codex", "chatgpt"} else ACCENT, str(n))
         elif "done" in st:
             badge = (GREEN, "✓")
         if badge:
@@ -1122,7 +1239,7 @@ class Pet:
             head = tk.Label(top, text=icon + name[:28], bg=INNER, fg=color,
                             font=(FONT, 9, "bold"))
             head.pack(side="left")
-            srcl = tk.Label(top, text="  Codex" if e.get("src") == "codex" else "  Claude",
+            srcl = tk.Label(top, text="  " + SRC_LABEL.get(e.get("src"), "Claude"),
                             bg=INNER, fg=src_color, font=(FONT, 8, "bold"))
             srcl.pack(side="left")
             info = tk.Label(top, text=self.info_text(e, now), bg=INNER,
@@ -1213,6 +1330,16 @@ def main():
     ctypes.windll.kernel32.CreateMutexW(None, False, "TaskPetWidget")
     if ctypes.windll.kernel32.GetLastError() == 183:  # 이미 실행 중
         return
+    # 창 없는 exe는 오류를 보여 줄 곳이 없어서, 오류가 나면 error.log에 남긴다
+    if sys.stderr is None:
+        try:
+            log = os.path.join(APP_DIR, "error.log")
+            if os.path.exists(log) and os.path.getsize(log) > 200_000:
+                os.remove(log)
+            sys.stderr = open(log, "a", encoding="utf-8", buffering=1)
+            sys.stderr.write(f"\n--- 시작 {time.strftime('%Y-%m-%d %H:%M:%S')} v{VERSION}\n")
+        except OSError:
+            pass
     make_sounds()
     Pet()
 
