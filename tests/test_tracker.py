@@ -113,4 +113,19 @@ cx("task_complete", 90)
 assert "x:t1" not in tr.tasks
 cx("task_started", -5)                     # 지운 뒤 새로 시작
 assert tr.tasks["x:t1"]["status"] == "working"
+
+# 일반 ChatGPT 채팅: '작업 중' 목록이 바뀌는 대로 시작·완료
+events.clear()
+tr.codex_titles["t1"] = "코덱스 대화"
+gp = lambda *w: tr.apply_chatgpt({"ok": True, "hwnd": 1, "working": list(w)})
+gp()                                                 # 처음 보고: 아무것도 없음
+gp("새 채팅", "코덱스 대화")                        # 시작 (Codex 제목은 무시)
+assert tr.tasks["g:새 채팅"]["status"] == "working" and "g:코덱스 대화" not in tr.tasks
+gp("1분간 생각 테스트")                              # 답하는 중 제목이 바뀜 → 같은 줄로 이어짐
+assert "g:새 채팅" not in tr.tasks and tr.tasks["g:1분간 생각 테스트"]["status"] == "working"
+tr.apply_chatgpt({"ok": False, "hwnd": 0, "working": []})   # 창이 잠깐 안 보여도 그대로
+assert tr.tasks["g:1분간 생각 테스트"]["status"] == "working"
+gp()                                                 # 끝남
+assert tr.tasks["g:1분간 생각 테스트"]["status"] == "done"
+assert events == ["start", "done"], events
 print("통과", events)
