@@ -12,6 +12,7 @@ SRC = os.path.join(ROOT, "src")
 BUILD = os.path.join(ROOT, "build")
 DIST = os.path.join(ROOT, "dist")
 CSC = r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+WPF = r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
 
 
 def make_icon(path):
@@ -52,11 +53,20 @@ def main():
                     os.path.join(SRC, "hook.cs")], check=True)
     print("훅 완료")
 
+    gpt = os.path.join(BUILD, "taskpet-chatgpt.exe")
+    subprocess.run([CSC, "/nologo", "/optimize+", "/target:exe",
+                    f"/out:{gpt}", f"/win32icon:{icon}",
+                    rf"/r:{WPF}\UIAutomationClient.dll", rf"/r:{WPF}\UIAutomationTypes.dll",
+                    rf"/r:{WPF}\WindowsBase.dll",
+                    os.path.join(SRC, "chatgpt_watch.cs")], check=True)
+    print("ChatGPT 감시 완료")
+
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
         "--onefile", "--windowed", "--name", "TaskPet",
         "--icon", icon,
         "--add-binary", f"{hook};.",
+        "--add-binary", f"{gpt};.",
         "--distpath", DIST, "--workpath", os.path.join(BUILD, "pyi"),
         "--specpath", BUILD,
         os.path.join(SRC, "taskpet.py"),
