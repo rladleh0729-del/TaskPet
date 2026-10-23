@@ -532,6 +532,10 @@ class Tracker:
         saved = read_json(STATE, {})
         self.tasks = saved.get("tasks", {})
         self.ev_off = saved.get("events_offset", 0)
+        # 사용자가 지운 Codex 줄: 키 → 지운 시각. Codex 기록은 다시 읽으므로 이보다 옛 일은 무시
+        now = time.time()
+        self.dismissed = {k: v for k, v in saved.get("dismissed", {}).items()
+                          if now - v < 24 * 3600}
         self.on_event = on_event          # (종류, 키) — 소리·말풍선용
         self.codex_off = {}               # 파일 → 읽은 위치
         self.codex_rest = {}              # 파일 → 덜 읽힌 줄 조각
@@ -546,7 +550,8 @@ class Tracker:
             self.dirty = False
             try:
                 write_json(STATE, {"tasks": self.tasks,
-                                   "events_offset": self.ev_off})
+                                   "events_offset": self.ev_off,
+                                   "dismissed": self.dismissed})
             except OSError:
                 pass
 
@@ -691,7 +696,23 @@ class Tracker:
                 e.pop("bg", None)
         self.dirty = True
 
+    def drop_deleted(self):
+        """앱에서 대화를 지우면 기록 파일도 지워지므로, 파일이 사라진 줄은 목록에서 뺀다."""
+        for key in list(self.tasks):
+            e = self.tasks[key]
+            path = e.get("transcript") or e.get("rollout")
+            if not path:
+                continue
+            if os.path.exists(path):
+                if not e.get("seen"):
+                    e["seen"] = True
+                    self.dirty = True
+            elif e.get("seen") or time.time() - e.get("start", 0) > 60:
+                del self.tasks[key]    # 있던(또는 진작 생겼어야 할) 파일이 없음 = 삭제됨
+                self.dirty = True
+
     def refresh_claude_titles(self):
+        self.drop_deleted()
         for key, e in self.tasks.items():
             # '백그라운드 기다리는 중'이 실제로는 끝나 있고 질문으로 멈춘 상태면 바로잡는다
             if e.get("src") == "claude" and e.get("bg") and e.get("transcript"):
@@ -738,6 +759,30 @@ class Tracker:
                     e["title"] = title
                     self.dirty = True
 
+    def recent_codex_rollouts(self):
+        """예전 대화를 이어 쓰면 기록은 처음 시작한 날짜 폴더에 덧붙여지므로,
+        Codex 대화 목록 DB에서 최근 12시간 안에 움직인 대화의 기록 파일을 찾는다."""
+        now = time.time()
+        if now - getattr(self, "_db_checked", 0) < 10:
+            return getattr(self, "_db_files", [])
+        self._db_checked = now
+        files = []
+        for db in sorted(glob.glob(os.path.join(CODEX_DIR, "state_*.sqlite")))[-1:]:
+            try:
+                import sqlite3
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1)
+                try:
+                    rows = con.execute("select rollout_path from threads "
+                                       "where updated_at > ? and rollout_path is not null",
+                                       (int(now) - 12 * 3600,)).fetchall()
+                finally:
+                    con.close()
+                files = [r[0] for r in rows if r[0] and r[0].endswith(".jsonl")]
+            except Exception:
+                pass
+        self._db_files = files
+        return files
+
     def scan_codex(self):
         base = os.path.join(CODEX_DIR, "sessions")
         if not os.path.isdir(base):
@@ -749,6 +794,11 @@ class Tracker:
             d = datetime.now() - timedelta(days=days)
             files += glob.glob(os.path.join(base, d.strftime("%Y"), d.strftime("%m"),
                                             d.strftime("%d"), "*.jsonl"))
+        seen = {os.path.normcase(f) for f in files}
+        for f in self.recent_codex_rollouts():
+            if os.path.normcase(f) not in seen and os.path.exists(f):
+                files.append(f)
+                seen.add(os.path.normcase(f))
         for f in files:
             if f in self.codex_ignore:
                 continue
@@ -779,6 +829,9 @@ class Tracker:
                     continue
                 if not self.codex_record(f, tid, rec, live=not first):
                     break
+            e = self.tasks.get("x:" + tid)
+            if e is not None and e.get("rollout") != f:
+                e["rollout"] = f
 
     def codex_record(self, f, tid, rec, live):
         typ = rec.get("type")
@@ -798,6 +851,8 @@ class Tracker:
                 rec.get("timestamp", "").replace("Z", "+00:00")).timestamp()
         except Exception:
             ts = time.time()
+        if ts <= self.dismissed.get(key, 0):
+            return True            # 지우기 전에 있었던 일
         e = self.tasks.get(key)
         if kind == "task_started":
             self.tasks[key] = {
@@ -925,12 +980,14 @@ class Pet:
     def clear_done(self):
         tasks = self.tracker.tasks
         for k in [k for k, e in tasks.items() if e.get("status") == "done"]:
+            self.tracker.dismissed[k] = time.time()
             del tasks[k]
         self.tracker.dirty = True
         self.update_bubble(force=True)
 
     def dismiss(self, key):
         self.tracker.tasks.pop(key, None)
+        self.tracker.dismissed[key] = time.time()
         self.tracker.dirty = True
         self.update_bubble(force=True)
 
