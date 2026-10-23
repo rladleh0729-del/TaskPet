@@ -90,4 +90,27 @@ with open(transcript, "a", encoding="utf-8") as f:
         {"type": "tool_use", "name": "mcp__ccd_turn__wrap_up", "input": {"recap": "끝"}}]}}) + "\n")
 ev("stop")
 assert tr.tasks["c:s1"]["status"] == "done", tr.tasks["c:s1"]
+
+# 앱에서 대화를 지우면(기록 파일 삭제) 목록에서도 빠짐
+tr.drop_deleted()
+assert tr.tasks["c:s1"].get("seen")
+os.remove(transcript)
+tr.drop_deleted()
+assert "c:s1" not in tr.tasks
+
+# Codex: 지운 줄은 기록을 다시 읽어도 안 살아나고, 그 뒤 새 작업만 다시 뜸
+def cx(kind, sec_ago):
+    tr.codex_record("f", "t1", {"type": "event_msg", "timestamp": iso(sec_ago),
+                                "payload": {"type": kind}}, live=True)
+
+
+cx("task_started", 100)
+cx("task_complete", 90)
+tr.tasks.pop("x:t1")
+tr.dismissed["x:t1"] = time.time()
+cx("task_started", 100)                    # 로봇을 다시 켜서 처음부터 읽음
+cx("task_complete", 90)
+assert "x:t1" not in tr.tasks
+cx("task_started", -5)                     # 지운 뒤 새로 시작
+assert tr.tasks["x:t1"]["status"] == "working"
 print("통과", events)
