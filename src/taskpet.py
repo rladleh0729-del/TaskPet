@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -95,6 +95,8 @@ SUB = "#9a9aa6"
 ACCENT = "#f5942b"
 GREEN = "#4cc46a"
 RED = "#ff6b6b"
+BLUE = "#4ea1ff"
+SRC_COLOR = {"claude": ACCENT, "codex": BLUE}   # 어느 도구의 대화인지 (Claude 주황, Codex 파랑)
 FONT = "맑은 고딕" if KO else "Segoe UI"
 
 # ---- 픽셀 로봇 (15 x 16) ----
@@ -1053,7 +1055,9 @@ class Pet:
         if "waiting" in st:
             badge = (RED, "!")
         elif n:
-            badge = (ACCENT, str(n))
+            srcs = {e.get("src") for e in self.tracker.tasks.values()
+                    if e.get("status") == "working"}
+            badge = (BLUE if srcs == {"codex"} else ACCENT, str(n))
         elif "done" in st:
             badge = (GREEN, "✓")
         if badge:
@@ -1066,7 +1070,6 @@ class Pet:
     # ---- 말풍선 ----
     @staticmethod
     def info_text(e, now):
-        src = "Codex" if e.get("src") == "codex" else "Claude"
         if e.get("status") == "done":
             when = time.strftime("%H:%M", time.localtime(e.get("end", now)))
             body = t("done", w=when, d=fmt_dur(e.get("end", now) - e.get("start", now)))
@@ -1076,7 +1079,7 @@ class Pet:
             body = t("bg", n=e["bg"], d=fmt_dur(now - e.get("start", now)))
         else:
             body = t("working", d=fmt_dur(now - e.get("start", now)))
-        return f"  {src} · {body}"
+        return f" · {body}"
 
     def update_bubble(self, force=False):
         order = {"waiting": 0, "working": 1, "done": 2}
@@ -1108,7 +1111,8 @@ class Pet:
 
         for key, e in shown:
             status = e.get("status")
-            color = {"done": GREEN, "waiting": RED}.get(status, ACCENT)
+            src_color = SRC_COLOR.get(e.get("src"), ACCENT)
+            color = {"done": GREEN, "waiting": RED}.get(status, src_color)
             icon = {"done": "✅ ", "waiting": "❗ "}.get(status, "⚙ ")
             row = tk.Frame(self.bub_box, bg=INNER)
             row.pack(fill="x", padx=S(2), pady=S(2) if compact else S(3))
@@ -1118,6 +1122,9 @@ class Pet:
             head = tk.Label(top, text=icon + name[:28], bg=INNER, fg=color,
                             font=(FONT, 9, "bold"))
             head.pack(side="left")
+            srcl = tk.Label(top, text="  Codex" if e.get("src") == "codex" else "  Claude",
+                            bg=INNER, fg=src_color, font=(FONT, 8, "bold"))
+            srcl.pack(side="left")
             info = tk.Label(top, text=self.info_text(e, now), bg=INNER,
                             fg=RED if status == "waiting" else SUB,
                             font=(FONT, 8, "bold" if status == "waiting" else "normal"))
@@ -1127,7 +1134,7 @@ class Pet:
                          cursor="hand2")
             x.pack(side="right")
             x.bind("<Button-1>", lambda ev, k=key: self.dismiss(k))
-            widgets = [row, top, head, info]
+            widgets = [row, top, head, srcl, info]
             prompt = e.get("prompt")
             if (not compact and status != "waiting" and prompt
                     and e.get("title") and prompt != e.get("title")):
