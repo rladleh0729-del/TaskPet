@@ -42,6 +42,10 @@ def ev(name, **d):
     tr.claude_event({"ev": name, "t": now_ms, "d": d})
 
 
+assert taskpet.clean_prompt("") == "(이미지)"                  # 이미지만 보냄
+assert taskpet.clean_prompt("[Image #1]") == "(이미지)"
+assert taskpet.clean_prompt("[Image #1] 이거 봐") == "이거 봐"
+assert taskpet.clean_prompt("<system-reminder>...") is None    # 자동 메시지 → 직전 질문 유지
 ev("start", prompt="학습 돌려 줘")
 ev("stop")
 e = tr.tasks["c:s1"]
@@ -128,4 +132,38 @@ assert tr.tasks["g:1분간 생각 테스트"]["status"] == "working"
 gp()                                                 # 끝남
 assert tr.tasks["g:1분간 생각 테스트"]["status"] == "done"
 assert events == ["start", "done"], events
+
+# 브라우저 chatgpt.com (확장 → 연결 프로그램 → events.jsonl 의 "web" 신호)
+events.clear()
+def web(state, sec_ago=0, **d):
+    tr.claude_event({"ev": "web", "t": int((time.time() - sec_ago) * 1000),
+                     "d": {"type": "state", "state": state, "tab": 5, **d}})
+web("working", title="새 채팅")
+web("working", title="웹 시험 대화", conv="c-123")    # 답하는 도중 제목·주소가 생김 → 같은 줄
+assert tr.tasks["w:5"]["status"] == "working" and tr.tasks["w:5"]["title"] == "웹 시험 대화"
+gp("웹 시험 대화")                                   # 데스크톱 앱 목록에도 보여도 한 번만
+assert "g:웹 시험 대화" not in tr.tasks
+web("done", title="웹 시험 대화", conv="c-123")
+assert tr.tasks["w:5"]["status"] == "done" and tr.tasks["w:5"]["conv"] == "c-123"
+web("working", sec_ago=120, title="옛 신호")         # 로봇을 다시 켜서 읽은 옛 신호는 소리 없음
+web("closed")                                        # 탭을 닫으면 줄이 빠짐
+assert "w:5" not in tr.tasks
+assert events == ["start", "done"], events
+
+# Claude 앱(MSIX) 가상 공간에 쓰인 신호도 읽음. 처음 본 파일의 옛 기록은 건너뜀
+pkg = os.path.join(tmp, "Packages", "Claude_x", "LocalCache", "Local", "TaskPet")
+os.makedirs(pkg)
+taskpet.PKG_EVENTS = os.path.join(tmp, "Packages", "*", "LocalCache", "Local", "TaskPet",
+                                  "events.jsonl")
+pfile = os.path.join(pkg, "events.jsonl")
+def pkg_ev(name, sid):
+    with open(pfile, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ev": name, "t": int(time.time() * 1000),
+                            "d": {"session_id": sid, "transcript_path": "", "cwd": r"C:\p"}}) + "\n")
+pkg_ev("start", "old")
+tr.read_claude_events()
+assert "c:old" not in tr.tasks
+pkg_ev("resume", "s9")
+tr.read_claude_events()
+assert tr.tasks["c:s9"]["status"] == "working", tr.tasks.get("c:s9")
 print("통과", events)
