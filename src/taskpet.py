@@ -29,10 +29,10 @@ import winreg
 import winsound
 from datetime import datetime, timedelta
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -50,6 +50,7 @@ FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 EVENTS = os.path.join(APP_DIR, "events.jsonl")
 STATE = os.path.join(APP_DIR, "state.json")
+SETTINGS = os.path.join(APP_DIR, "settings.json")   # 로봇 위치, 소리 끄기
 QUIT_FLAG = os.path.join(APP_DIR, "quit.flag")
 WEB_CMD = os.path.join(APP_DIR, "web-cmd.jsonl")   # 로봇 → 브라우저 확장 (탭 열기)
 # Claude 데스크톱은 MSIX 앱이라 그 안에서 실행된 훅이 쓰는 %LOCALAPPDATA% 는
@@ -75,6 +76,7 @@ T = {
     "update_fail": ("받기 실패 · 더블 클릭해서 다시", "download failed · double-click to retry"),
     "clear": ("완료 기록 모두 지우기", "Clear finished"),
     "quit": ("종료", "Quit"),
+    "mute": ("소리 끄기", "Mute sounds"),
     "uninstall": ("TaskPet 제거", "Uninstall TaskPet"),
     "installed": ("TaskPet 설치 완료!\n\n화면 오른쪽 아래 주황 로봇이 Claude Code와 Codex 작업을 알려 줍니다.\n\n· 이미 열려 있던 Claude Code 세션은 새로 시작해야 잡힙니다.\n· 로봇 클릭 = 말풍선 숨기기, 줄 더블 클릭 = 그 대화 열기, 우클릭 = 메뉴",
                   "TaskPet installed!\n\nThe orange robot at the bottom right shows your Claude Code and Codex tasks.\n\n· Claude Code sessions that were already open need to be restarted.\n· Click robot = hide bubble, double-click a row = open that chat, right-click = menu"),
@@ -131,6 +133,64 @@ SRC_LABEL = {"claude": "Claude", "claudeweb": "Claude 웹", "claudechat": "Claud
              "chatweb": "ChatGPT 웹", "gemini": "Gemini", "grok": "Grok", "kimi": "Kimi",
              "update": "TaskPet"}
 UPDATE_API = "https://api.github.com/repos/rladleh0729-del/TaskPet/releases/latest"
+# 줄 앞 아이콘 종류 (공식 로고 파일은 쓰지 않고, 각 회사를 떠올리게 하는 모양을 직접 그린다)
+ICON_KIND = {"claude": "claude", "claudeweb": "claude", "claudechat": "claude",
+             "codex": "gpt", "chatgpt": "gpt", "chatweb": "gpt", "gemini": "gemini",
+             "grok": "grok", "kimi": "kimi", "update": "update"}
+
+
+def brand_icon(kind, size):
+    k = 4                                  # 4배로 그려 줄여서 매끈하게
+    n = size * k
+    c = n / 2
+    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    if kind == "gpt":                      # 둥근 고리 셋을 60도씩 돌려 겹친 매듭
+        for i in range(3):
+            ring = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+            ImageDraw.Draw(ring).rounded_rectangle(
+                [n * 0.31, n * 0.05, n * 0.69, n * 0.95], radius=n * 0.19,
+                outline="#e8e8ec", width=max(2, int(n * 0.09)))
+            img.alpha_composite(ring.rotate(60 * i, resample=Image.BICUBIC, center=(c, c)))
+    elif kind == "gemini":                 # 파랑→보라 네 갈래 반짝이 별
+        pts = []
+        for i in range(8):
+            a = -math.pi / 2 + math.pi * i / 4
+            r = n * 0.49 if i % 2 == 0 else n * 0.15
+            pts.append((c + r * math.cos(a), c + r * math.sin(a)))
+        mask = Image.new("L", (n, n), 0)
+        ImageDraw.Draw(mask).polygon(pts, fill=255)
+        grad = Image.new("RGBA", (n, n))
+        gd = ImageDraw.Draw(grad)
+        for y in range(n):
+            t = y / (n - 1)
+            gd.line([(0, y), (n, y)], fill=(int(78 + 91 * t), int(140 - 17 * t), 255, 255))
+        img.paste(grad, (0, 0), mask)
+    elif kind == "grok":                   # 원을 가르는 사선
+        w = max(2, int(n * 0.1))
+        d.arc([n * 0.08, n * 0.08, n * 0.92, n * 0.92], start=150, end=330, fill="#e8e8ec", width=w)
+        d.line([(n * 0.22, n * 0.9), (n * 0.9, n * 0.1)], fill="#e8e8ec", width=w)
+    elif kind == "kimi":                   # 흰 상자에 K, 파란 점
+        d.rounded_rectangle([n * 0.04, n * 0.04, n * 0.96, n * 0.96], radius=n * 0.24, fill="#e8e8ec")
+        try:
+            f = ImageFont.truetype(os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
+                                                "Fonts", "arialbd.ttf"), int(n * 0.66))
+            d.text((n * 0.44, c + n * 0.03), "K", font=f, fill="#1b1c20", anchor="mm")
+        except OSError:
+            pass
+        d.ellipse([n * 0.7, n * 0.16, n * 0.86, n * 0.32], fill="#3d8bff")
+    elif kind == "update":                 # 초록 동그라미에 위 화살표
+        d.ellipse([0, 0, n - 1, n - 1], fill=GREEN)
+        d.polygon([(c, n * 0.17), (n * 0.8, n * 0.52), (n * 0.2, n * 0.52)], fill="#1b1c20")
+        d.rectangle([c - n * 0.1, n * 0.5, c + n * 0.1, n * 0.8], fill="#1b1c20")
+    else:                                  # Claude: 길이를 번갈아 둔 주황 빛살
+        for i in range(12):
+            a = math.pi * i / 6 + math.pi / 12
+            r = n * 0.48 if i % 2 == 0 else n * 0.36
+            d.line([(c, c), (c + r * math.cos(a), c + r * math.sin(a))],
+                   fill="#d97757", width=max(2, int(n * 0.1)))
+        d.ellipse([c - n * 0.12, c - n * 0.12, c + n * 0.12, c + n * 0.12], fill="#d97757")
+    return img.resize((size, size), Image.LANCZOS)
 # 브라우저 확장이 보내는 사이트 이름 → (줄 종류, 이름)
 WEB_SITES = {"chatgpt": ("chatweb", "ChatGPT"), "gemini": ("gemini", "Gemini"),
              "claude": ("claudeweb", "Claude"), "grok": ("grok", "Grok"), "kimi": ("kimi", "Kimi")}
@@ -229,7 +289,12 @@ def make_sounds():
             pass
 
 
+MUTED = False   # 우클릭 메뉴 '소리 끄기' (settings.json 에 기억)
+
+
 def play(name):
+    if MUTED:
+        return
     path = os.path.join(APP_DIR, f"{name}.wav")
     try:
         winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC
@@ -1314,6 +1379,11 @@ class Pet:
         self._bub_sig = None
         self._pos_sig = None
         self._infos = []
+        self._icons = {}
+        # 사용자 설정: 로봇 위치, 소리 끄기
+        global MUTED
+        self.settings = read_json(SETTINGS, {})
+        MUTED = bool(self.settings.get("mute"))
 
         self.bubble = tk.Toplevel(self.root)
         self.bubble.overrideredirect(True)
@@ -1338,7 +1408,13 @@ class Pet:
         self.canvas.bind("<Button-3>", self.menu)
 
         l, t_, r, b = work_area()
-        self.root.geometry(f"{self.cw}x{self.ch}+{r - self.cw - S(260)}+{b - self.ch - S(10)}")
+        x, y = r - self.cw - S(260), b - self.ch - S(10)
+        pos = self.settings.get("pos")
+        # 옮겨 둔 자리를 기억하되, 화면 배치가 바뀌어 밖으로 나가면 기본 자리로
+        if (isinstance(pos, list) and len(pos) == 2
+                and l <= pos[0] <= r - self.cw and t_ <= pos[1] <= b - self.ch):
+            x, y = pos
+        self.root.geometry(f"{self.cw}x{self.ch}+{x}+{y}")
         self.tick()
         self.root.mainloop()
 
@@ -1368,7 +1444,9 @@ class Pet:
     def release(self, e):
         moved = self._press[4] if self._press else False
         self._press = None
-        if not moved:
+        if moved:
+            self.save_setting("pos", [self.root.winfo_x(), self.root.winfo_y()])
+        else:
             self.hidden = not self.hidden
             if not self.hidden:
                 self.happy_until = 0.0
@@ -1378,10 +1456,23 @@ class Pet:
         m = tk.Menu(self.root, tearoff=0, bg=INNER, fg=FG,
                     activebackground=ACCENT, activeforeground="#1b1c20")
         m.add_command(label=t("clear"), command=self.clear_done)
+        m.add_command(label=("✓ " if MUTED else "   ") + t("mute"), command=self.toggle_mute)
         m.add_separator()
         m.add_command(label=t("uninstall"), command=self.do_uninstall)
         m.add_command(label=t("quit"), command=self.root.destroy)
         m.tk_popup(e.x_root, e.y_root)
+
+    def toggle_mute(self):
+        global MUTED
+        MUTED = not MUTED
+        self.save_setting("mute", MUTED)
+
+    def save_setting(self, key, value):
+        self.settings[key] = value
+        try:
+            write_json(SETTINGS, self.settings)
+        except OSError:
+            pass
 
     def do_uninstall(self):
         if msgbox(t("ask_uninstall"), 0x24) == 6:
@@ -1536,14 +1627,15 @@ class Pet:
             status = e.get("status")
             src_color = SRC_COLOR.get(e.get("src"), ACCENT)
             color = {"done": GREEN, "waiting": RED}.get(status, src_color)
-            icon = {"done": "✅ ", "waiting": "❗ ", "update": "⬆ "}.get(status, "⚙ ")
+            mark = {"done": "✅ ", "waiting": "❗ "}.get(status, "")
             row = tk.Frame(self.bub_box, bg=INNER)
             row.pack(fill="x", padx=S(2), pady=S(2) if compact else S(3))
             top = tk.Frame(row, bg=INNER)
             top.pack(fill="x")
             name = e.get("title") or e.get("prompt") or e.get("folder", "?")
-            head = tk.Label(top, text=icon + name[:28], bg=INNER, fg=color,
-                            font=(FONT, 9, "bold"))
+            # 맨 앞 아이콘으로 어느 AI인지, 글자 색·✅/❗로 상태를 보인다
+            head = tk.Label(top, text=" " + mark + name[:28], image=self.icon(e.get("src")),
+                            compound="left", bg=INNER, fg=color, font=(FONT, 9, "bold"))
             head.pack(side="left")
             srcl = tk.Label(top, text="  " + SRC_LABEL.get(e.get("src"), "Claude"),
                             bg=INNER, fg=src_color, font=(FONT, 8, "bold"))
@@ -1577,6 +1669,12 @@ class Pet:
             tk.Label(self.bub_box, text=t("more", n=len(items) - 8), bg=INNER,
                      fg=SUB, font=(FONT, 8)).pack(anchor="w", padx=S(2))
         self.show_bubble()
+
+    def icon(self, src):
+        kind = ICON_KIND.get(src, "claude")
+        if kind not in self._icons:
+            self._icons[kind] = ImageTk.PhotoImage(brand_icon(kind, S(14)))
+        return self._icons[kind]
 
     @staticmethod
     def hover(parts, on, ev=None):
