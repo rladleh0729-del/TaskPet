@@ -160,6 +160,16 @@ assert g["src"] == "gemini" and g["status"] == "done" and g["title"] == "제미�
 assert g["url"].endswith("/app/abc123") and taskpet.SRC_LABEL[g["src"]] == "Gemini"
 assert events == ["start", "done"], events
 
+# claude.ai → 주황 "Claude 웹", grok.com → "Grok"
+web("working", tab=8, site="claude", title="클로드 웹 시험", url="https://claude.ai/chat/x1")
+web("working", tab=9, site="grok", title="", url="https://grok.com/")
+assert tr.tasks["w:8"]["src"] == "claudeweb" and taskpet.SRC_LABEL["claudeweb"] == "Claude 웹"
+assert tr.tasks["w:9"]["src"] == "grok" and tr.tasks["w:9"]["title"] == "Grok"
+web("done", tab=8, site="claude", title="클로드 웹 시험")
+assert tr.tasks["w:8"]["status"] == "done" and tr.tasks["w:8"]["url"].endswith("/chat/x1")
+web("working", tab=10, site="kimi", title="안녕", url="https://www.kimi.ai/chat/k1")
+assert tr.tasks["w:10"]["src"] == "kimi" and taskpet.SRC_LABEL["kimi"] == "Kimi"
+
 # Claude 앱(MSIX) 가상 공간에 쓰인 신호도 읽음. 처음 본 파일의 옛 기록은 건너뜀
 pkg = os.path.join(tmp, "Packages", "Claude_x", "LocalCache", "Local", "TaskPet")
 os.makedirs(pkg)
