@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -208,6 +208,8 @@ def brand_icon(kind, size):
 WEB_SITES = {"chatgpt": ("chatweb", "ChatGPT"), "gemini": ("gemini", "Gemini"),
              "claude": ("claudeweb", "Claude"), "grok": ("grok", "Grok"), "kimi": ("kimi", "Kimi")}
 WEB_SRCS = tuple(src for src, _ in WEB_SITES.values())
+BROWSER_NAME = {"chrome": "Chrome", "brave": "Brave", "msedge": "Edge", "chromium": "Chromium",
+                "vivaldi": "Vivaldi", "opera": "Opera", "whale": "Whale"}
 FONT = "맑은 고딕" if KO else "Segoe UI"
 
 # ---- 픽셀 로봇 (15 x 16) ----
@@ -661,7 +663,7 @@ def version_tuple(v):
 
 
 class Updater:
-    """하루 한 번 GitHub 최신 릴리스를 확인한다. '새 버전' 줄을 더블 클릭하면 받아서 설치 프로그램을 실행
+    """켤 때와 3시간마다 GitHub 최신 릴리스를 확인한다. '새 버전' 줄을 더블 클릭하면 받아서 설치 프로그램을 실행
     (설치 프로그램이 지금 로봇을 끄고 덮어쓴 뒤 새 로봇을 띄운다)."""
 
     def __init__(self):
@@ -670,7 +672,7 @@ class Updater:
 
     def tick(self):
         if time.time() >= self.next_check:
-            self.next_check = time.time() + 24 * 3600
+            self.next_check = time.time() + 3 * 3600   # 켜 둔 채로도 반나절 안에 알게
             threading.Thread(target=self._check, daemon=True).start()
 
     def take(self):
@@ -794,18 +796,25 @@ def open_task(key, e):
         return
     if e.get("src") in WEB_SRCS:
         # 브라우저가 켜져 있으면 연결 프로그램을 거쳐 그 탭을 앞으로, 아니면 그 대화를 새로 연다
+        # 그 줄이 나온 브라우저에서만 연다 (브라우저마다 계정이 다를 수 있음)
         url = e.get("url") or (f"https://chatgpt.com/c/{e['conv']}" if e.get("conv")
                                else "https://chatgpt.com/")
-        host_alive = subprocess.run(
-            ["tasklist", "/fi", f"imagename eq {NATIVE_EXE}", "/nh"], capture_output=True,
-            creationflags=NO_WINDOW).stdout.decode("cp949", "ignore").lower().find(NATIVE_EXE) >= 0
-        if host_alive:
+        browser = e.get("browser", "")
+        exe = (browser + ".exe") if browser else NATIVE_EXE
+        alive = subprocess.run(
+            ["tasklist", "/fi", f"imagename eq {exe}", "/nh"], capture_output=True,
+            creationflags=NO_WINDOW).stdout.decode("cp949", "ignore").lower().find(exe) >= 0
+        if alive:
             with open(WEB_CMD, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"cmd": "open", "tab": e.get("tab"), "conv": e.get("conv", ""),
-                                    "url": url}) + "\n")
+                                    "url": url, "browser": browser}) + "\n")
         else:
             try:
-                os.startfile(url)
+                path = e.get("browser_path", "")
+                if path and os.path.exists(path):
+                    subprocess.Popen([path, url], creationflags=0x00000008)
+                else:
+                    os.startfile(url)
             except OSError:
                 pass
         return
@@ -1116,7 +1125,9 @@ class Tracker:
             return
         ts = rec.get("t", 0) / 1000
         live = time.time() - ts < 30
-        key = f"w:{tab}"
+        # 탭 번호는 브라우저마다 따로 매겨지므로 브라우저 이름까지 붙여 구분한다
+        browser = d.get("browser", "")
+        key = f"w:{browser}:{tab}" if browser else f"w:{tab}"
         e = self.tasks.get(key)
         state = d.get("state")
         if state == "closed":
@@ -1134,6 +1145,7 @@ class Tracker:
                     return
                 self.tasks[key] = {"src": src, "id": str(tab),
                                    "tab": tab, "conv": conv, "url": url,
+                                   "browser": browser, "browser_path": d.get("browser_path", ""),
                                    "title": title, "prompt": "", "folder": name,
                                    "start": ts, "status": "working"}
                 if live:
@@ -1734,7 +1746,10 @@ class Pet:
             head = tk.Label(top, text=" " + mark + name[:28], image=self.icon(e.get("src")),
                             compound="left", bg=INNER, fg=color, font=(FONT, 9, "bold"))
             head.pack(side="left")
-            srcl = tk.Label(top, text="  " + SRC_LABEL.get(e.get("src"), "Claude"),
+            label = SRC_LABEL.get(e.get("src"), "Claude")
+            if e.get("browser"):                 # 웹 줄은 어느 브라우저인지도
+                label += " · " + BROWSER_NAME.get(e["browser"], e["browser"].capitalize())
+            srcl = tk.Label(top, text="  " + label,
                             bg=INNER, fg=src_color, font=(FONT, 8, "bold"))
             srcl.pack(side="left")
             info = tk.Label(top, text=self.info_text(e, now), bg=INNER,

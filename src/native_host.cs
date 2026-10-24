@@ -2,17 +2,81 @@
 // 브라우저가 확장의 요청으로 이 프로그램을 띄우고, 표준 입출력으로 [4바이트 길이 + UTF-8 JSON]을 주고받는다.
 //   확장 → 여기: {"type":"state","state":"working|done|closed","tab":1,"conv":"...","title":"..."}
 //          → 같은 폴더 events.jsonl 에 {"ev":"web","t":ms,"d":{...}} 한 줄 덧붙임 (로봇이 읽음)
-//   로봇 → 여기: 같은 폴더 web-cmd.jsonl 에 {"cmd":"open","tab":1,"conv":"..."} 한 줄
+//   로봇 → 여기: 같은 폴더 web-cmd.jsonl 에 {"cmd":"open","tab":1,"conv":"...","browser":"chrome"} 한 줄
 //          → 확장에게 그대로 전달 (그 탭을 앞으로 가져옴)
+// 브라우저마다 이 프로그램이 하나씩 뜨므로, 자기를 띄운 브라우저(brave·chrome·msedge…)를 알아내
+// 신호에 "browser"를 붙이고, 명령도 자기 브라우저 것만 넘긴다 (탭 번호는 브라우저마다 따로라서).
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 class TaskPetNative
 {
     static readonly object WriteLock = new object();
     static Stream Out;
+    static string Browser = "";       // 예: "brave", "chrome", "msedge"
+    static string BrowserPath = "";
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct PROCESSENTRY32
+    {
+        public uint dwSize, cntUsage, th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID, cntThreads, th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern bool Process32FirstW(IntPtr snap, ref PROCESSENTRY32 e);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern bool Process32NextW(IntPtr snap, ref PROCESSENTRY32 e);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr h);
+
+    // 부모를 거슬러 올라가 cmd·conhost(브라우저가 이 프로그램을 띄울 때 끼는 것)가 아닌 첫 프로세스 = 브라우저
+    static void FindBrowser()
+    {
+        var parent = new System.Collections.Generic.Dictionary<int, int>();
+        var name = new System.Collections.Generic.Dictionary<int, string>();
+        IntPtr snap = CreateToolhelp32Snapshot(2, 0);   // TH32CS_SNAPPROCESS
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return;
+        try
+        {
+            var e = new PROCESSENTRY32();
+            e.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+            for (bool ok = Process32FirstW(snap, ref e); ok; ok = Process32NextW(snap, ref e))
+            {
+                parent[(int)e.th32ProcessID] = (int)e.th32ParentProcessID;
+                name[(int)e.th32ProcessID] = e.szExeFile ?? "";
+            }
+        }
+        finally { CloseHandle(snap); }
+        int pid = Process.GetCurrentProcess().Id;
+        for (int i = 0; i < 6 && parent.ContainsKey(pid); i++)
+        {
+            pid = parent[pid];
+            string n;
+            if (!name.TryGetValue(pid, out n)) return;
+            n = Path.GetFileNameWithoutExtension(n).ToLowerInvariant();
+            if (n == "cmd" || n == "conhost") continue;
+            Browser = n;
+            try { BrowserPath = Process.GetProcessById(pid).MainModule.FileName; } catch { }
+            return;
+        }
+    }
+
+    static string Json(string s)
+    {
+        return "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    }
 
     static void Send(string json)
     {
@@ -87,7 +151,12 @@ class TaskPetNative
                 foreach (var line in all.Substring(0, cut).Split('\n'))
                 {
                     string t = line.Trim();
-                    if (t.StartsWith("{")) Send(t);
+                    if (!t.StartsWith("{")) continue;
+                    // 다른 브라우저에게 온 명령은 넘기지 않는다 (예전 로봇처럼 browser 가 없으면 넘김)
+                    var m = Regex.Match(t, "\"browser\"\\s*:\\s*\"([^\"]*)\"");
+                    if (m.Success && m.Groups[1].Value.Length > 0 && Browser.Length > 0
+                        && m.Groups[1].Value != Browser) continue;
+                    Send(t);
                 }
             }
             catch { }
@@ -100,6 +169,7 @@ class TaskPetNative
             System.Reflection.Assembly.GetExecutingAssembly().Location);
         Out = Console.OpenStandardOutput();
         var input = Console.OpenStandardInput();
+        try { FindBrowser(); } catch { }
 
         var watcher = new Thread(() => WatchCommands(dir));
         watcher.IsBackground = true;
@@ -114,9 +184,14 @@ class TaskPetNative
             var body = new byte[len];
             if (!ReadExactly(input, body, len)) return 0;
             string msg = Encoding.UTF8.GetString(body).Trim();
-            if (msg.StartsWith("{") && System.Text.RegularExpressions.Regex.IsMatch(
-                    msg, "\"type\"\\s*:\\s*\"state\""))
+            if (msg.StartsWith("{") && Regex.IsMatch(msg, "\"type\"\\s*:\\s*\"state\""))
+            {
+                // 어느 브라우저 탭인지 붙여 둔다
+                if (Browser.Length > 0)
+                    msg = "{\"browser\":" + Json(Browser) + ",\"browser_path\":" + Json(BrowserPath)
+                          + (msg.Length > 2 ? "," : "") + msg.Substring(1);
                 AppendEvent(dir, msg);
+            }
         }
     }
 }
