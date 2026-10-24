@@ -19,8 +19,11 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import tkinter as tk
+import urllib.request
 import wave
 import winreg
 import winsound
@@ -29,7 +32,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -65,6 +68,11 @@ T = {
     "bg": ("백그라운드 {n}개 기다리는 중 · {d}", "{n} background task(s) · {d}"),
     "done": ("완료 {w} · {d}", "done {w} · {d}"),
     "more": ("… 외 {n}개", "… {n} more"),
+    "update_title": ("새 버전 {v}", "New version {v}"),
+    "update_ready": ("더블 클릭해서 업데이트", "double-click to update"),
+    "update_dl": ("받는 중 {p}%", "downloading {p}%"),
+    "update_run": ("설치 프로그램 실행", "installer started"),
+    "update_fail": ("받기 실패 · 더블 클릭해서 다시", "download failed · double-click to retry"),
     "clear": ("완료 기록 모두 지우기", "Clear finished"),
     "quit": ("종료", "Quit"),
     "uninstall": ("TaskPet 제거", "Uninstall TaskPet"),
@@ -104,6 +112,7 @@ def S(v):
 # ---- 색 ----
 KEY = "#0b0c0d"      # 이 색이 투명해짐
 INNER = "#221c28"
+HOVER = "#3a3042"    # 마우스를 올린 줄
 BORDER = "#f5942b"
 FG = "#e8e8ec"
 SUB = "#9a9aa6"
@@ -115,10 +124,13 @@ PURPLE = "#a98bff"
 SILVER = "#cfd3dc"
 TEAL = "#3dd6c6"
 # Claude 주황, GPT 쪽 파랑, Gemini 보라, Grok 은색, Kimi 청록
-SRC_COLOR = {"claude": ACCENT, "claudeweb": ACCENT, "codex": BLUE, "chatgpt": BLUE,
-             "chatweb": BLUE, "gemini": PURPLE, "grok": SILVER, "kimi": TEAL}
-SRC_LABEL = {"claude": "Claude", "claudeweb": "Claude 웹", "codex": "Codex", "chatgpt": "ChatGPT",
-             "chatweb": "ChatGPT 웹", "gemini": "Gemini", "grok": "Grok", "kimi": "Kimi"}
+SRC_COLOR = {"claude": ACCENT, "claudeweb": ACCENT, "claudechat": ACCENT, "codex": BLUE, "chatgpt": BLUE,
+             "chatweb": BLUE, "gemini": PURPLE, "grok": SILVER, "kimi": TEAL, "update": GREEN}
+SRC_LABEL = {"claude": "Claude", "claudeweb": "Claude 웹", "claudechat": "Claude 채팅",
+             "codex": "Codex", "chatgpt": "ChatGPT",
+             "chatweb": "ChatGPT 웹", "gemini": "Gemini", "grok": "Grok", "kimi": "Kimi",
+             "update": "TaskPet"}
+UPDATE_API = "https://api.github.com/repos/rladleh0729-del/TaskPet/releases/latest"
 # 브라우저 확장이 보내는 사이트 이름 → (줄 종류, 이름)
 WEB_SITES = {"chatgpt": ("chatweb", "ChatGPT"), "gemini": ("gemini", "Gemini"),
              "claude": ("claudeweb", "Claude"), "grok": ("grok", "Grok"), "kimi": ("kimi", "Kimi")}
@@ -547,14 +559,15 @@ class ChatGptWatcher:
         self.fresh = False
         return self.report
 
-    def open(self, title):
+    def open(self, title, app="chatgpt"):
+        cmd, hkey = ("openclaude", "claude_hwnd") if app == "claude" else ("open", "hwnd")
         if self.proc and self.proc.poll() is None:
             try:
-                self.proc.stdin.write(("open\t" + title + "\n").encode("utf-8"))
+                self.proc.stdin.write((cmd + "\t" + title + "\n").encode("utf-8"))
                 self.proc.stdin.flush()
             except OSError:
                 pass
-        hwnd = (self.report or {}).get("hwnd") or 0
+        hwnd = (self.report or {}).get(hkey) or 0
         if hwnd:   # 로봇을 방금 누른 참이라 창을 앞으로 가져올 수 있다
             u = ctypes.windll.user32
             if u.IsIconic(hwnd):
@@ -565,7 +578,77 @@ class ChatGptWatcher:
 GPT = None   # Pet이 띄운 ChatGptWatcher
 
 
+def version_tuple(v):
+    return tuple(int(n) for n in re.findall(r"\d+", str(v))[:3])
+
+
+class Updater:
+    """하루 한 번 GitHub 최신 릴리스를 확인한다. '새 버전' 줄을 더블 클릭하면 받아서 설치 프로그램을 실행
+    (설치 프로그램이 지금 로봇을 끄고 덮어쓴 뒤 새 로봇을 띄운다)."""
+
+    def __init__(self):
+        self.found = None                 # (태그, 받을 주소, 크기) — 화면 쪽이 가져감
+        self.next_check = time.time() + 20
+
+    def tick(self):
+        if time.time() >= self.next_check:
+            self.next_check = time.time() + 24 * 3600
+            threading.Thread(target=self._check, daemon=True).start()
+
+    def take(self):
+        found, self.found = self.found, None
+        return found
+
+    def _check(self):
+        try:
+            req = urllib.request.Request(UPDATE_API, headers={
+                "User-Agent": "TaskPet/" + VERSION, "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                rel = json.load(r)
+            asset = next(a for a in rel.get("assets", []) if a.get("name") == "TaskPet.exe")
+            self.found = (rel["tag_name"], asset["browser_download_url"], asset.get("size", 0))
+        except Exception:
+            self.next_check = time.time() + 3600   # 인터넷이 안 되면 1시간 뒤 다시
+
+    @staticmethod
+    def install(e):
+        if e.get("phase") in ("dl", "run"):
+            return
+        e.update(phase="dl", pct=0)
+        threading.Thread(target=Updater._download, args=(e,), daemon=True).start()
+
+    @staticmethod
+    def _download(e):
+        folder = os.path.join(tempfile.gettempdir(), "TaskPet-update")
+        path = os.path.join(folder, "TaskPet.exe")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            req = urllib.request.Request(e["url"], headers={"User-Agent": "TaskPet/" + VERSION})
+            with urllib.request.urlopen(req, timeout=60) as r, open(path + ".part", "wb") as f:
+                total = int(r.headers.get("Content-Length") or e.get("size") or 0)
+                got = 0
+                while True:
+                    b = r.read(256 * 1024)
+                    if not b:
+                        break
+                    f.write(b)
+                    got += len(b)
+                    if total:
+                        e["pct"] = got * 100 // total
+            if e.get("size") and os.path.getsize(path + ".part") != e["size"]:
+                raise OSError("크기가 다름")
+            os.replace(path + ".part", path)
+            env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+            subprocess.Popen([path], cwd=folder, creationflags=0x00000008, env=env)
+            e["phase"] = "run"
+        except Exception:
+            e["phase"] = "fail"
+
+
 def open_task(key, e):
+    if e.get("src") == "update":
+        Updater.install(e)
+        return
     if e.get("src") in WEB_SRCS:
         # 브라우저가 켜져 있으면 연결 프로그램을 거쳐 그 탭을 앞으로, 아니면 그 대화를 새로 연다
         url = e.get("url") or (f"https://chatgpt.com/c/{e['conv']}" if e.get("conv")
@@ -583,9 +666,9 @@ def open_task(key, e):
             except OSError:
                 pass
         return
-    if e.get("src") == "chatgpt":
+    if e.get("src") in ("chatgpt", "claudechat"):
         if GPT:
-            GPT.open(e.get("title", ""))
+            GPT.open(e.get("title", ""), "claude" if e.get("src") == "claudechat" else "chatgpt")
         return
     if e.get("src") == "codex":
         url = f"codex://threads/{e.get('id')}"
@@ -688,7 +771,8 @@ class Tracker:
 
     def __init__(self, on_event):
         saved = read_json(STATE, {})
-        self.tasks = saved.get("tasks", {})
+        # '새 버전' 줄은 저장해 두지 않고 켤 때마다 다시 확인한다 (받는 도중 꺼졌던 상태가 남지 않게)
+        self.tasks = {k: v for k, v in saved.get("tasks", {}).items() if not k.startswith("u:")}
         self.ev_off = saved.get("events_offset", 0)
         self.pkg_off = saved.get("pkg_offsets", {})   # 앱 가상 공간 신호 파일 → 읽은 위치
         # 사용자가 지운 Codex 줄: 키 → 지운 시각. Codex 기록은 다시 읽으므로 이보다 옛 일은 무시
@@ -703,6 +787,7 @@ class Tracker:
         self.codex_index_mtime = 0
         self.last_codex_scan = 0
         self.gpt_working = None           # 직전에 '작업 중'이던 일반 채팅 제목들 (처음엔 모름)
+        self.claude_working = None        # Claude 앱 일반 채팅도 같은 방식
         self.dirty = False
 
     def save(self):
@@ -741,50 +826,63 @@ class Tracker:
         return s
 
     def apply_chatgpt(self, report):
-        """감시 프로그램이 보낸 '작업 중' 제목 목록으로 일반 채팅의 시작·완료를 정한다."""
-        if not report or not report.get("ok"):
-            return          # ChatGPT 창이 없으면 판단을 미룬다
+        """감시 프로그램이 보낸 '작업 중' 제목 목록(ChatGPT 앱, Claude 앱)으로 일반 채팅의 시작·완료를 정한다."""
+        if not report:
+            return
+        if report.get("ok"):              # ChatGPT 창이 없으면 판단을 미룬다
+            codex = self.codex_title_set()
+            # 브라우저에서 돌리는 대화가 데스크톱 앱 목록에도 '작업 중'으로 보이면 한 번만 띄운다
+            codex.update(e.get("title", "") for e in self.tasks.values()
+                         if e.get("src") == "chatweb" and e.get("status") == "working")
+            # Codex 대화로 밝혀진 줄은 일반 채팅 목록에서 뺀다 (Codex는 기록 파일로 따로 잡음)
+            self._apply_app_chats("g:", "chatgpt", "ChatGPT", report.get("working"), codex,
+                                  "gpt_working")
+        if report.get("claude_ok"):       # Claude 창이 없거나 Code 탭이면 판단을 미룬다
+            # Claude Code 세션(훅으로 잡음)·claude.ai 탭과 같은 제목이면 한 번만 띄운다
+            same = {e.get("title", "") for e in self.tasks.values()
+                    if e.get("src") == "claude"
+                    or (e.get("src") == "claudeweb" and e.get("status") == "working")}
+            same.discard("")
+            self._apply_app_chats("k:", "claudechat", "Claude", report.get("claude"), same,
+                                  "claude_working")
+
+    def _apply_app_chats(self, prefix, src, folder, titles, skip, attr):
         now = time.time()
-        codex = self.codex_title_set()
-        # 브라우저에서 돌리는 대화가 데스크톱 앱 목록에도 '작업 중'으로 보이면 한 번만 띄운다
-        codex.update(e.get("title", "") for e in self.tasks.values()
-                     if e.get("src") == "chatweb" and e.get("status") == "working")
-        cur = {t for t in report.get("working") or [] if t and t not in codex}
-        first = self.gpt_working is None
-        prev = set() if first else self.gpt_working
-        # Codex 대화로 밝혀진 줄은 일반 채팅 목록에서 뺀다 (Codex는 기록 파일로 따로 잡음)
+        cur = {t for t in titles or [] if t and t not in skip}
+        first = getattr(self, attr) is None
+        prev = set() if first else getattr(self, attr)
         for k in [k for k, e in self.tasks.items()
-                  if e.get("src") == "chatgpt" and e.get("title") in codex]:
+                  if e.get("src") == src and e.get("title") in skip]:
             del self.tasks[k]
             self.dirty = True
         added, removed = cur - prev, prev - cur
         # 답하는 도중 제목이 바뀌면(새 채팅 → 자동 제목) 같은 대화로 잇는다
         if len(added) == 1 and len(removed) == 1:
-            old, new = "g:" + next(iter(removed)), "g:" + next(iter(added))
+            old, new = prefix + next(iter(removed)), prefix + next(iter(added))
             e = self.tasks.pop(old, None)
             if e and e.get("status") == "working":
-                e["title"] = new[2:]
+                e["title"] = new[len(prefix):]
                 self.tasks[new] = e
                 added, removed = set(), set()
                 self.dirty = True
         for t in added:
-            key = "g:" + t
+            key = prefix + t
             e = self.tasks.get(key)
             if e and e.get("status") == "working":
                 continue
-            self.tasks[key] = {"src": "chatgpt", "id": t, "title": t, "prompt": "",
-                               "folder": "ChatGPT", "start": now, "status": "working"}
+            self.tasks[key] = {"src": src, "id": t, "title": t, "prompt": "",
+                               "folder": folder, "start": now, "status": "working"}
             self.dirty = True
             if not first:
                 self.on_event("start", key)
         for k, e in self.tasks.items():
-            if e.get("src") == "chatgpt" and e.get("status") == "working" and e["title"] not in cur:
+            if e.get("src") == src and e.get("status") == "working" and e["title"] not in cur:
                 e["status"] = "done"     # 로봇을 다시 켰을 때 이미 끝나 있던 것도 여기서 정리
                 e["end"] = now
                 self.dirty = True
                 if not first:
                     self.on_event("done", k)
-        self.gpt_working = cur
+        setattr(self, attr, cur)
 
     # ---- Claude Code ----
     def read_claude_events(self):
@@ -992,6 +1090,19 @@ class Tracker:
                 e["end"] = ts
                 e.pop("bg", None)
         self.dirty = True
+
+    def apply_update(self, tag, url, size):
+        """GitHub 최신 릴리스가 지금보다 새것이면 '새 버전' 줄을 하나 둔다 (✕로 지우면 하루 동안 안 뜸)."""
+        newer = version_tuple(tag) > version_tuple(VERSION)
+        key = "u:" + tag
+        for k in [k for k in self.tasks if k.startswith("u:") and (k != key or not newer)]:
+            del self.tasks[k]
+            self.dirty = True
+        if newer and key not in self.tasks and key not in self.dismissed:
+            self.tasks[key] = {"src": "update", "id": tag, "prompt": "", "folder": APP,
+                               "title": t("update_title", v=tag.lstrip("vV")),
+                               "start": time.time(), "status": "update", "url": url, "size": size}
+            self.dirty = True
 
     def drop_deleted(self):
         """앱에서 대화를 지우면 기록 파일도 지워지므로, 파일이 사라진 줄은 목록에서 뺀다."""
@@ -1217,6 +1328,7 @@ class Pet:
         self.bubble.withdraw()
 
         self.tracker = Tracker(self.on_event)
+        self.updater = Updater()
         global GPT
         GPT = ChatGptWatcher()
 
@@ -1312,6 +1424,10 @@ class Pet:
             if rep:
                 self.tracker.apply_chatgpt(rep)
             self.tracker.poll()
+            self.updater.tick()
+            found = self.updater.take()
+            if found:
+                self.tracker.apply_update(*found)
             if self.tick_n % 10 == 1:
                 self.tracker.refresh_claude_titles()
             self.update_bubble()
@@ -1372,7 +1488,12 @@ class Pet:
     # ---- 말풍선 ----
     @staticmethod
     def info_text(e, now):
-        if e.get("status") == "done":
+        if e.get("status") == "update":
+            phase = e.get("phase")
+            body = (t("update_dl", p=e.get("pct", 0)) if phase == "dl" else
+                    t("update_run") if phase == "run" else
+                    t("update_fail") if phase == "fail" else t("update_ready"))
+        elif e.get("status") == "done":
             when = time.strftime("%H:%M", time.localtime(e.get("end", now)))
             body = t("done", w=when, d=fmt_dur(e.get("end", now) - e.get("start", now)))
         elif e.get("status") == "waiting":
@@ -1415,7 +1536,7 @@ class Pet:
             status = e.get("status")
             src_color = SRC_COLOR.get(e.get("src"), ACCENT)
             color = {"done": GREEN, "waiting": RED}.get(status, src_color)
-            icon = {"done": "✅ ", "waiting": "❗ "}.get(status, "⚙ ")
+            icon = {"done": "✅ ", "waiting": "❗ ", "update": "⬆ "}.get(status, "⚙ ")
             row = tk.Frame(self.bub_box, bg=INNER)
             row.pack(fill="x", padx=S(2), pady=S(2) if compact else S(3))
             top = tk.Frame(row, bg=INNER)
@@ -1447,10 +1568,30 @@ class Pet:
             for w in widgets:
                 w.bind("<Button-1>", lambda ev, k=key: self.row_click(k))
                 w.configure(cursor="hand2")
+            # 마우스를 올린 줄은 배경을 살짝 밝게 (더블 클릭할 줄이 어느 것인지 보이게)
+            parts = widgets + [x]
+            for w in parts:
+                w.bind("<Enter>", lambda ev, ps=parts: self.hover(ps, True), add="+")
+                w.bind("<Leave>", lambda ev, ps=parts: self.hover(ps, False, ev), add="+")
         if len(items) > 8:
             tk.Label(self.bub_box, text=t("more", n=len(items) - 8), bg=INNER,
                      fg=SUB, font=(FONT, 8)).pack(anchor="w", padx=S(2))
         self.show_bubble()
+
+    @staticmethod
+    def hover(parts, on, ev=None):
+        if not on and ev is not None:
+            # 같은 줄 안의 다른 글자로 옮겨 갔을 뿐이면 그대로 둔다
+            try:
+                if parts[0].winfo_containing(ev.x_root, ev.y_root) in parts:
+                    return
+            except (tk.TclError, KeyError):
+                pass
+        for w in parts:
+            try:
+                w.configure(bg=HOVER if on else INNER)
+            except tk.TclError:
+                pass
 
     def show_bubble(self):
         if self.bubble.state() == "withdrawn":
