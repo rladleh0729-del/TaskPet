@@ -170,6 +170,37 @@ assert tr.tasks["w:8"]["status"] == "done" and tr.tasks["w:8"]["url"].endswith("
 web("working", tab=10, site="kimi", title="안녕", url="https://www.kimi.ai/chat/k1")
 assert tr.tasks["w:10"]["src"] == "kimi" and taskpet.SRC_LABEL["kimi"] == "Kimi"
 
+# Claude 데스크톱 앱 일반 채팅: '실행 중' 목록으로 시작·완료, Code 탭(claude_ok=False)일 땐 판단 보류
+events.clear()
+cl = lambda ok, *w: tr.apply_chatgpt({"ok": False, "claude_ok": ok, "claude": list(w)})
+cl(True)                                             # 처음 보고
+cl(True, "번역 부탁", "작업 상태 표시 프로그램")      # 시작 (Claude Code 세션과 같은 제목은 무시)
+tr.tasks["c:zz"] = {"src": "claude", "title": "작업 상태 표시 프로그램", "status": "working"}
+cl(True, "번역 부탁", "작업 상태 표시 프로그램")
+assert tr.tasks["k:번역 부탁"]["status"] == "working" and "k:작업 상태 표시 프로그램" not in tr.tasks
+cl(False)                                            # Code 탭으로 옮김 → 그대로
+assert tr.tasks["k:번역 부탁"]["status"] == "working"
+cl(True)                                             # 채팅 화면에서 끝남
+assert tr.tasks["k:번역 부탁"]["status"] == "done" and taskpet.SRC_LABEL["claudechat"] == "Claude 채팅"
+assert events.count("done") == 1, events
+del tr.tasks["c:zz"]
+
+# 새 버전 알림: 지금보다 새것만, 지우면 안 뜸, 따라잡으면 사라짐
+V = taskpet.VERSION
+assert taskpet.version_tuple("v1.10.0") > taskpet.version_tuple("v1.9.9")
+up = lambda tag: tr.apply_update(tag, "https://x/TaskPet.exe", 10)
+up("v0.0.1")
+assert not [k for k in tr.tasks if k.startswith("u:")]
+up("v99.0.0")
+assert tr.tasks["u:v99.0.0"]["status"] == "update" and tr.tasks["u:v99.0.0"]["title"] == "새 버전 99.0.0"
+up("v99.0.1")                                       # 더 새 버전이 나오면 줄이 바뀜
+assert "u:v99.0.0" not in tr.tasks and "u:v99.0.1" in tr.tasks
+tr.tasks.pop("u:v99.0.1"); tr.dismissed["u:v99.0.1"] = time.time()
+up("v99.0.1")
+assert "u:v99.0.1" not in tr.tasks                 # ✕로 지운 버전은 다시 안 뜸
+up("v" + V)
+assert not [k for k in tr.tasks if k.startswith("u:")]
+
 # Claude 앱(MSIX) 가상 공간에 쓰인 신호도 읽음. 처음 본 파일의 옛 기록은 건너뜀
 pkg = os.path.join(tmp, "Packages", "Claude_x", "LocalCache", "Local", "TaskPet")
 os.makedirs(pkg)
