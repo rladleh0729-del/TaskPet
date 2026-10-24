@@ -150,6 +150,16 @@ web("closed")                                        # 탭을 닫으면 줄이 �
 assert "w:5" not in tr.tasks
 assert events == ["start", "done"], events
 
+# 브라우저 gemini.google.com: 같은 신호에 site=gemini → 보라 "Gemini" 줄, 주소 기억
+events.clear()
+web("working", tab=7, site="gemini", title="새 채팅", url="https://gemini.google.com/app")
+web("done", tab=7, site="gemini", title="제미나이 시험", conv="abc123",
+    url="https://gemini.google.com/app/abc123")
+g = tr.tasks["w:7"]
+assert g["src"] == "gemini" and g["status"] == "done" and g["title"] == "제미나이 시험", g
+assert g["url"].endswith("/app/abc123") and taskpet.SRC_LABEL[g["src"]] == "Gemini"
+assert events == ["start", "done"], events
+
 # Claude 앱(MSIX) 가상 공간에 쓰인 신호도 읽음. 처음 본 파일의 옛 기록은 건너뜀
 pkg = os.path.join(tmp, "Packages", "Claude_x", "LocalCache", "Local", "TaskPet")
 os.makedirs(pkg)
