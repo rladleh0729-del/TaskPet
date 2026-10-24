@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.3"
+VERSION = "1.4.4"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -1156,6 +1156,9 @@ class Tracker:
             e.update(status="done", end=ts, title=title, conv=conv, url=url)
             if live:
                 self.on_event("done", key)
+        elif state == "done" and e and e.get("status") == "done":
+            # 끝난 뒤에 붙은 제목(새 채팅 → 자동 제목)이나 대화 주소만 고친다 (소리 없음)
+            e.update(title=title, conv=conv, url=url)
         self.dirty = True
 
     def claude_event(self, rec):
