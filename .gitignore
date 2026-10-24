@@ -5,3 +5,4 @@ __pycache__/
 events.jsonl
 state.json
 *.wav
+extension_key.pem

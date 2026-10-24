@@ -61,12 +61,20 @@ def main():
                     os.path.join(SRC, "chatgpt_watch.cs")], check=True)
     print("ChatGPT 감시 완료")
 
+    native = os.path.join(BUILD, "taskpet-native.exe")
+    subprocess.run([CSC, "/nologo", "/optimize+", "/target:exe",
+                    f"/out:{native}", f"/win32icon:{icon}",
+                    os.path.join(SRC, "native_host.cs")], check=True)
+    print("Native Messaging 연결 완료")
+
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
         "--onefile", "--windowed", "--name", "TaskPet",
         "--icon", icon,
         "--add-binary", f"{hook};.",
         "--add-binary", f"{gpt};.",
+        "--add-binary", f"{native};.",
+        "--add-data", f"{os.path.join(ROOT, 'extension')};chrome-extension",
         "--distpath", DIST, "--workpath", os.path.join(BUILD, "pyi"),
         "--specpath", BUILD,
         os.path.join(SRC, "taskpet.py"),
