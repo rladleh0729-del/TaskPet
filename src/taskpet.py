@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -37,7 +37,8 @@ GPT_EXE = "taskpet-chatgpt.exe"
 NATIVE_EXE = "taskpet-native.exe"
 NATIVE_NAME = "kr.querybot.taskpet"
 # 확장 'TaskPet for ChatGPT'의 ID (manifest.json의 key로 고정됨)
-EXT_IDS = ["dmbfmfooilahmdclgfkkkdnpickfbilm"]
+# 연결을 허용할 브라우저 확장: Chrome 웹 스토어판, 직접 불러온 개발판(manifest "key"로 고정)
+EXT_IDS = ["ojhigjdohhpkdkolpeeobffggkejpakn", "dmbfmfooilahmdclgfkkkdnpickfbilm"]
 NATIVE_KEYS = [r"Software\Google\Chrome\NativeMessagingHosts",
                r"Software\Chromium\NativeMessagingHosts",
                r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
