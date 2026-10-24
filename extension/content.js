@@ -1,7 +1,8 @@
-// TaskPet — 이 탭의 ChatGPT / Gemini가 답을 쓰는 중인지 살펴서 TaskPet 로봇에게 알린다.
+// TaskPet — 이 탭의 ChatGPT / Gemini / Claude / Grok / Kimi가 답을 쓰는 중인지 살펴서 TaskPet 로봇에게 알린다.
 // 대화 내용은 읽지 않는다. 보내는 것: 사이트, 답변 중/끝남, 대화 주소(id), 대화 제목.
 
-const STOP_LABEL = /^(stop|중지|응답 중지|스트리밍 중지|대답 생성 중지|stop streaming|stop response|停止)/i;
+// (Grok은 '모델 응답 중지') — '받아쓰기 중지' 같은 다른 버튼과 헷갈리지 않게 앞부분이 맞아야 한다
+const STOP_LABEL = /^(stop|중지|응답 중지|응답 생성 중지|모델 응답 중지|생성 중지|스트리밍 중지|대답 생성 중지|stop streaming|stop response|stop generating|stop model|停止)/i;
 const DONE_DELAY = 1500;   // 잠깐 멈췄다가 다시 쓰는 경우가 있어 이만큼 조용해야 끝으로 본다
 
 function hasStopButton(selector) {
@@ -40,8 +41,63 @@ const SITES = {
     link: (id) => `a[href$="/app/${id}"]`,
     plainTitle: 'Google Gemini',
   },
+  claude: {
+    // 답하는 동안 입력창의 보내기 버튼이 '응답 중지' 버튼으로 바뀐다
+    generating: () => editorHasStop(),
+    conv() {
+      const m = location.pathname.match(/\/chat\/([\w-]+)/);
+      return m ? m[1] : '';
+    },
+    link: (id) => `a[href$="/chat/${id}"]`,
+    plainTitle: 'Claude',
+  },
+  grok: {
+    generating: () => editorHasStop(),
+    conv() {
+      const m = location.pathname.match(/\/c\/([\w-]+)/);
+      return m ? m[1] : '';
+    },
+    link: (id) => `a[href*="/c/${id}"]`,
+    plainTitle: 'Grok',
+  },
+  kimi: {
+    // 버튼에 이름이 없다. 보내기 상자 안 아이콘이 평소 name="Send" → 답하는 동안 다른 아이콘(중지)
+    generating() {
+      const box = document.querySelector('.send-button-container');
+      if (!box) return false;
+      if (/stop|pause/i.test(box.className)) return true;
+      const icon = box.querySelector('svg[name]');
+      return !!icon && !/^send$/i.test(icon.getAttribute('name'));
+    },
+    conv() {
+      const m = location.pathname.match(/\/chat\/([\w-]+)/);
+      return m && m[1] !== 'history' ? m[1] : '';
+    },
+    link: (id) => `a[href*="/chat/${id}"]`,
+    plainTitle: 'Kimi',
+  },
 };
-const SITE = location.hostname.includes('gemini.google.com') ? 'gemini' : 'chatgpt';
+
+// 입력창(글 쓰는 칸)을 감싼 form / 상자 안에 '중지' 버튼이 있는지
+function editorHasStop() {
+  const ed = document.querySelector('[contenteditable="true"], textarea');
+  if (!ed) return false;
+  let box = ed.closest('form, fieldset');
+  if (!box) {
+    box = ed;
+    for (let i = 0; i < 8 && box.parentElement; i++) box = box.parentElement;
+  }
+  for (const b of box.querySelectorAll('button[aria-label]')) {
+    if (STOP_LABEL.test(b.getAttribute('aria-label').trim())) return true;
+  }
+  return false;
+}
+
+const HOST = location.hostname;
+const SITE = HOST.includes('gemini.google.com') ? 'gemini'
+  : HOST.endsWith('claude.ai') ? 'claude'
+  : HOST.endsWith('grok.com') ? 'grok'
+  : /kimi\.(ai|com)$|kimi\.moonshot\.cn$/.test(HOST) ? 'kimi' : 'chatgpt';
 const S = SITES[SITE];
 
 function title() {
@@ -51,8 +107,9 @@ function title() {
     const t = a && a.textContent.trim();
     if (t) return t.slice(0, 80);
   }
-  const t = document.title.trim();
-  return t && t !== S.plainTitle ? t.slice(0, 80) : '새 채팅';
+  // 탭 제목에서 ' - Claude' 같은 사이트 이름 꼬리는 뗀다
+  const t = document.title.trim().replace(new RegExp(`\\s*[-–|]\\s*${S.plainTitle}$`), '');
+  return t && t !== S.plainTitle && t !== '새 세션' ? t.slice(0, 80) : '새 채팅';
 }
 
 let state = 'idle';
@@ -88,7 +145,7 @@ function check() {
 }
 
 // 화면이 바뀔 때마다 확인하고, 뒤쪽 탭에서 화면 갱신이 줄어드는 경우를 대비해 1초마다도 확인
-new MutationObserver(check).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'data-testid', 'class', 'fonticon'] });
+new MutationObserver(check).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'data-testid', 'class', 'fonticon', 'name'] });
 setInterval(check, 1000);
 check();
 

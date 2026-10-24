@@ -1,4 +1,4 @@
-// TaskPet for ChatGPT & Gemini — 탭에서 받은 상태를 Native Messaging으로 TaskPet에 전달하고,
+// TaskPet for AI Chats — 탭에서 받은 상태를 Native Messaging으로 TaskPet에 전달하고,
 // TaskPet에서 줄을 더블 클릭하면 그 탭을 앞으로 가져온다.
 const HOST = 'kr.querybot.taskpet';
 let port = null;
