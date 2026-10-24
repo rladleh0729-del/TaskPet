@@ -48,13 +48,13 @@ def main():
     print("아이콘 완료")
 
     hook = os.path.join(BUILD, "taskpet-hook.exe")
-    subprocess.run([CSC, "/nologo", "/optimize+", "/target:exe",
+    subprocess.run([CSC, "/nologo", "/codepage:65001", "/optimize+", "/target:exe",
                     f"/out:{hook}", f"/win32icon:{icon}",
                     os.path.join(SRC, "hook.cs")], check=True)
     print("훅 완료")
 
     gpt = os.path.join(BUILD, "taskpet-chatgpt.exe")
-    subprocess.run([CSC, "/nologo", "/optimize+", "/target:exe",
+    subprocess.run([CSC, "/nologo", "/codepage:65001", "/optimize+", "/target:exe",
                     f"/out:{gpt}", f"/win32icon:{icon}",
                     rf"/r:{WPF}\UIAutomationClient.dll", rf"/r:{WPF}\UIAutomationTypes.dll",
                     rf"/r:{WPF}\WindowsBase.dll",
@@ -62,7 +62,7 @@ def main():
     print("ChatGPT 감시 완료")
 
     native = os.path.join(BUILD, "taskpet-native.exe")
-    subprocess.run([CSC, "/nologo", "/optimize+", "/target:exe",
+    subprocess.run([CSC, "/nologo", "/codepage:65001", "/optimize+", "/target:exe",
                     f"/out:{native}", f"/win32icon:{icon}",
                     os.path.join(SRC, "native_host.cs")], check=True)
     print("Native Messaging 연결 완료")
