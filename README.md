@@ -1,8 +1,8 @@
 # TaskPet 🤖
 
 AI 코딩 도구가 일하는 동안 화면 오른쪽 아래에서 상태를 알려 주는 작은 주황 로봇입니다.
-**Claude Code**, **Codex**(ChatGPT 데스크톱 앱·Codex CLI), **ChatGPT 일반 채팅**(데스크톱 앱, 그리고 확장을 넣으면 브라우저의 chatgpt.com)을 지원합니다. Windows 10/11 전용입니다.
-줄마다 붙는 이름표로 구분됩니다: **Claude**는 주황, **Codex**·**ChatGPT**는 파랑.
+**Claude Code**, **Codex**(ChatGPT 데스크톱 앱·Codex CLI), **ChatGPT 일반 채팅**(데스크톱 앱, 그리고 확장을 넣으면 브라우저의 chatgpt.com), **Gemini**(확장을 넣으면 브라우저의 gemini.google.com)를 지원합니다. Windows 10/11 전용입니다.
+줄마다 붙는 이름표로 구분됩니다: **Claude**는 주황, **Codex**·**ChatGPT**는 파랑, **Gemini**는 보라.
 
 | 상태 | 로봇 | 말풍선 |
 |---|---|---|
@@ -18,7 +18,7 @@ AI 코딩 도구가 일하는 동안 화면 오른쪽 아래에서 상태를 알
 2. 실행하면 바로 설치되고 로봇이 나타납니다. 컴퓨터를 켤 때도 자동으로 실행됩니다.
 3. 이미 열려 있던 Claude Code 세션은 새로 시작해야 잡힙니다.
 
-### 브라우저 chatgpt.com도 보려면 (선택)
+### 브라우저 chatgpt.com·Gemini도 보려면 (선택)
 
 Chrome·Brave·Edge에서 쓸 수 있습니다.
 
@@ -26,7 +26,8 @@ Chrome·Brave·Edge에서 쓸 수 있습니다.
 2. **압축해제된 확장 프로그램 로드** → `%LOCALAPPDATA%\TaskPet\chrome-extension` 폴더를 고릅니다.
 3. **브라우저를 완전히 껐다가 다시 켭니다**(설치 때 등록한 연결 정보를 브라우저가 다시 읽어야 합니다).
 
-chatgpt.com에서 질문을 보내면 "ChatGPT 웹" 줄이 생기고, 더블 클릭하면 그 탭으로 이동합니다.
+chatgpt.com에서 질문을 보내면 "ChatGPT 웹" 줄이, gemini.google.com에서 보내면 "Gemini" 줄이 생기고, 더블 클릭하면 그 탭으로 이동합니다.
+이미 확장을 넣어 두었다면 TaskPet을 업데이트한 뒤 확장 페이지에서 **새로고침(↻)**을 한 번 눌러 주세요.
 
 > 서명되지 않은 프로그램이라 Windows가 "PC 보호" 경고를 띄울 수 있습니다. **추가 정보 → 실행**을 누르세요. 소스 코드는 이 저장소에 전부 공개되어 있습니다.
 
@@ -48,7 +49,7 @@ Claude Code 설정에 넣었던 훅, 자동 실행, 설치 폴더가 모두 지�
 - **Claude Code**: `~/.claude/settings.json`에 훅 5개(UserPromptSubmit, Stop, Notification, PostToolUse, SessionEnd)를 **추가만** 합니다. 기존 설정은 처음 설치할 때 `settings.json.taskpet-backup`으로 백업됩니다. 훅은 작은 프로그램(`taskpet-hook.exe`)이 신호를 파일에 적기만 하고 바로 끝납니다.
 - **Codex**: 설정을 바꾸지 않고 `~/.codex/sessions`의 기록 파일을 읽기만 합니다. Codex는 현재 시작·완료만 표시하고, 승인 대기는 표시하지 않습니다.
 - **ChatGPT 일반 채팅**: 일반 채팅은 컴퓨터에 기록이 남지 않아서, 작은 프로그램(`taskpet-chatgpt.exe`)이 2초마다 ChatGPT 데스크톱 앱 창을 Windows 화면 읽기 기능(UI Automation)으로 읽어 왼쪽 목록에서 **"작업 중" 표시가 붙은 대화 제목**만 확인합니다. 대화 내용은 읽지 않고, 창을 누르지도 않습니다(더블 클릭으로 대화를 열 때만 그 줄을 누릅니다). ChatGPT 창이 열려 있어야 하며, 시작·완료만 표시합니다.
-- **브라우저 chatgpt.com**: 확장(`extension/`)이 chatgpt.com 페이지에서 입력창의 **'중지' 버튼이 있는지만** 확인해 답하는 중/끝남을 알아냅니다. 알아낸 상태(대화 제목·주소)는 브라우저의 Native Messaging으로 내 컴퓨터의 작은 프로그램(`taskpet-native.exe`)에 넘겨지고, 그 프로그램이 로봇에게 전달합니다. 대화 내용은 읽지 않습니다.
+- **브라우저 chatgpt.com·Gemini**: 확장(`extension/`)이 chatgpt.com·gemini.google.com 페이지에서 입력창의 **'중지' 버튼이 있는지만** 확인해 답하는 중/끝남을 알아냅니다. 알아낸 상태(대화 제목·주소)는 브라우저의 Native Messaging으로 내 컴퓨터의 작은 프로그램(`taskpet-native.exe`)에 넘겨지고, 그 프로그램이 로봇에게 전달합니다. 대화 내용은 읽지 않습니다.
 - 모든 정보는 내 컴퓨터 안에서만 읽고, 어디에도 보내지 않습니다.
 - "대화 바로 열기"는 각 앱의 공개되지 않은 링크 형식을 사용하므로, 앱 업데이트 후 동작하지 않을 수 있습니다. 그때는 가장 최근 대화가 열립니다.
 
@@ -72,7 +73,7 @@ TaskPet is a tiny orange pixel robot that sits at the bottom right of your scree
 - Click the robot to hide/show the bubble, drag it to move, double-click a row to jump to that chat, right-click for the menu.
 - Uninstall from the right-click menu or Windows Settings → Apps. All hooks it added are removed; your other settings stay untouched.
 - Claude Code is tracked through hooks it appends to `~/.claude/settings.json` (backed up first). Codex is tracked by reading `~/.codex/sessions` only. Regular ChatGPT chats leave no local record, so a small helper reads the ChatGPT window through Windows UI Automation every 2 seconds and only looks for the "working" indicator next to chat titles in the sidebar (the ChatGPT window must be open). Nothing leaves your computer.
-- Optional, for chatgpt.com in Chrome/Brave/Edge: open `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and pick `%LOCALAPPDATA%\TaskPet\chrome-extension`, then fully restart the browser. The extension only checks whether the "Stop" button is present and passes the state (title, URL) to TaskPet through Native Messaging (`taskpet-native.exe`). It never reads message content.
+- Optional, for chatgpt.com and gemini.google.com (Gemini rows are purple) in Chrome/Brave/Edge: open `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and pick `%LOCALAPPDATA%\TaskPet\chrome-extension`, then fully restart the browser. The extension only checks whether the "Stop" button is present and passes the state (title, URL) to TaskPet through Native Messaging (`taskpet-native.exe`). It never reads message content.
 
 Not affiliated with Anthropic or OpenAI. "Claude", "Codex" and "ChatGPT" are trademarks of their respective owners.
 
