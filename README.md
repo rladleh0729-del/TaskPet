@@ -22,8 +22,9 @@ AI 코딩 도구가 일하는 동안 화면 오른쪽 아래에서 상태를 알
 
 Chrome·Brave·Edge에서 쓸 수 있습니다.
 
-1. 브라우저 주소창에 `chrome://extensions`(Edge는 `edge://extensions`)를 열고 **개발자 모드**를 켭니다.
-2. **압축해제된 확장 프로그램 로드** → `%LOCALAPPDATA%\TaskPet\chrome-extension` 폴더를 고릅니다.
+0. 로봇 우클릭 → **브라우저 확장 받기**를 누르면 `다운로드\TaskPet-extension` 폴더가 생기고, 폴더 주소가 복사됩니다.
+1. 브라우저 주소창에 `chrome://extensions`(Brave는 `brave://extensions`, Edge는 `edge://extensions`)를 열고 **개발자 모드**를 켭니다.
+2. **압축해제된 확장 프로그램 로드** → 주소 칸에 붙여넣기(Ctrl+V) → 그 폴더를 고릅니다.
 3. **브라우저를 완전히 껐다가 다시 켭니다**(설치 때 등록한 연결 정보를 브라우저가 다시 읽어야 합니다).
 
 chatgpt.com·gemini.google.com·claude.ai·grok.com·kimi.ai에서 질문을 보내면 "ChatGPT 웹"·"Gemini"·"Claude 웹"·"Grok"·"Kimi" 줄이 생기고, 더블 클릭하면 그 탭으로 이동합니다.
@@ -38,7 +39,7 @@ chatgpt.com·gemini.google.com·claude.ai·grok.com·kimi.ai에서 질문을 보
 - **말풍선 줄 더블 클릭**: 그 대화를 Claude 앱 / ChatGPT 앱 / 브라우저 탭에서 바로 열기 (마우스를 올린 줄은 배경이 밝아집니다)
 - **✕**: 그 줄 지우기
 - **새 버전 알림**: 하루 한 번 새 버전을 확인해, 있으면 초록 "⬆ 새 버전" 줄이 생깁니다. 더블 클릭하면 받아서 업데이트합니다.
-- **우클릭**: 완료 기록 지우기 · 소리 끄기/켜기 · 제거 · 종료
+- **우클릭**: 버전 보기 · 완료 기록 지우기 · 소리 끄기/켜기 · 브라우저 확장 받기 · 제거 · 종료
 - 줄 맨 앞의 작은 아이콘으로 어느 AI인지 구분됩니다 (Claude 주황 빛살, GPT 매듭, Gemini 별, Grok 사선, Kimi K). 각 회사를 떠올리게 직접 그린 모양이며, 공식 로고 파일이 아닙니다.
 
 ## 제거
@@ -77,7 +78,7 @@ TaskPet is a tiny orange pixel robot that sits at the bottom right of your scree
 - Click the robot to hide/show the bubble, drag it to move (the position is remembered), mute sounds from the right-click menu, small hand-drawn icons (not official logos) show which AI each row is from, double-click a row to jump to that chat, right-click for the menu.
 - Uninstall from the right-click menu or Windows Settings → Apps. All hooks it added are removed; your other settings stay untouched.
 - Claude Code is tracked through hooks it appends to `~/.claude/settings.json` (backed up first). Codex is tracked by reading `~/.codex/sessions` only. Regular ChatGPT chats leave no local record, so a small helper reads the ChatGPT window through Windows UI Automation every 2 seconds and only looks for the "working" indicator next to chat titles in the sidebar (the ChatGPT window must be open); the same helper reads the Claude desktop app's sidebar for the "running" indicator while its chat view is shown. Nothing leaves your computer; the only network access is a daily check of the latest GitHub release.
-- Optional, for chatgpt.com, gemini.google.com, claude.ai, grok.com and kimi.ai in Chrome/Brave/Edge: open `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and pick `%LOCALAPPDATA%\TaskPet\chrome-extension`, then fully restart the browser. The extension only checks whether the "Stop" button is present and passes the state (title, URL) to TaskPet through Native Messaging (`taskpet-native.exe`). It never reads message content.
+- Optional, for chatgpt.com, gemini.google.com, claude.ai, grok.com and kimi.ai in Chrome/Brave/Edge: right-click the robot → **브라우저 확장 받기** (get browser extension) to save it to `Downloads\TaskPet-extension`, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and pick that folder, then fully restart the browser. The extension only checks whether the "Stop" button is present and passes the state (title, URL) to TaskPet through Native Messaging (`taskpet-native.exe`). It never reads message content.
 
 Not affiliated with Anthropic or OpenAI. "Claude", "Codex" and "ChatGPT" are trademarks of their respective owners.
 
