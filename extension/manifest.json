@@ -1,0 +1,39 @@
+{
+    "manifest_version":  3,
+    "name":  "TaskPet for ChatGPT",
+    "version":  "1.0.0",
+    "description":  "chatgpt.com에서 ChatGPT가 답을 쓰는 중인지, 끝났는지 TaskPet 로봇(Windows)에 알려 줍니다. 대화 내용은 읽지 않습니다.",
+    "key":  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq2L2yRjxop2NXIzlyCU7uxat6TGJM/MY5FWazDSBsuSsUYt47VTE8f5YZRxWy80cxky9ImFjgRns15ruZXnHpiJi63yaQ02rTnI9Cs6Z+Yu38y1nL5IAZ3wOLQWjdTa7MC/J4147xQnNT3DZZ2qvwFzQ3UwpZEu/miX+zFI57okseWO33g9eghCZscQkHWnPvbSyZwcMqcZMnY7pFhn243kH/saqbMKeLVrrXgIRM/2WWCrpyAIj+QrMzg6OYmw2Dd9XktqR4Q3YWZDyIlEeNvzS6F6Ajk9U0IxhrGRz8l6zUNXz1jZKRzU73f70FSGICwhvDw179TAzE0WceServwIDAQAB",
+    "minimum_chrome_version":  "105",
+    "permissions":  [
+                        "nativeMessaging"
+                    ],
+    "background":  {
+                       "service_worker":  "background.js"
+                   },
+    "content_scripts":  [
+                            {
+                                "run_at":  "document_idle",
+                                "matches":  [
+                                                "https://chatgpt.com/*",
+                                                "https://chat.openai.com/*"
+                                            ],
+                                "js":  [
+                                           "content.js"
+                                       ]
+                            }
+                        ],
+    "icons":  {
+                  "16":  "icons/16.png",
+                  "32":  "icons/32.png",
+                  "48":  "icons/48.png",
+                  "128":  "icons/128.png"
+              },
+    "action":  {
+                   "default_title":  "TaskPet for ChatGPT",
+                   "default_icon":  {
+                                        "16":  "icons/16.png",
+                                        "32":  "icons/32.png"
+                                    }
+               }
+}
