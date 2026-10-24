@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -110,8 +110,12 @@ ACCENT = "#f5942b"
 GREEN = "#4cc46a"
 RED = "#ff6b6b"
 BLUE = "#4ea1ff"
-SRC_COLOR = {"claude": ACCENT, "codex": BLUE, "chatgpt": BLUE, "chatweb": BLUE}   # Claude 주황, GPT 쪽 파랑
-SRC_LABEL = {"claude": "Claude", "codex": "Codex", "chatgpt": "ChatGPT", "chatweb": "ChatGPT 웹"}
+PURPLE = "#a98bff"
+# Claude 주황, GPT 쪽 파랑, Gemini 보라
+SRC_COLOR = {"claude": ACCENT, "codex": BLUE, "chatgpt": BLUE, "chatweb": BLUE, "gemini": PURPLE}
+SRC_LABEL = {"claude": "Claude", "codex": "Codex", "chatgpt": "ChatGPT", "chatweb": "ChatGPT 웹",
+             "gemini": "Gemini"}
+WEB_SRCS = ("chatweb", "gemini")   # 브라우저 확장으로 잡는 것
 FONT = "맑은 고딕" if KO else "Segoe UI"
 
 # ---- 픽셀 로봇 (15 x 16) ----
@@ -555,18 +559,20 @@ GPT = None   # Pet이 띄운 ChatGptWatcher
 
 
 def open_task(key, e):
-    if e.get("src") == "chatweb":
+    if e.get("src") in WEB_SRCS:
         # 브라우저가 켜져 있으면 연결 프로그램을 거쳐 그 탭을 앞으로, 아니면 그 대화를 새로 연다
+        url = e.get("url") or (f"https://chatgpt.com/c/{e['conv']}" if e.get("conv")
+                               else "https://chatgpt.com/")
         host_alive = subprocess.run(
             ["tasklist", "/fi", f"imagename eq {NATIVE_EXE}", "/nh"], capture_output=True,
             creationflags=NO_WINDOW).stdout.decode("cp949", "ignore").lower().find(NATIVE_EXE) >= 0
         if host_alive:
             with open(WEB_CMD, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"cmd": "open", "tab": e.get("tab"), "conv": e.get("conv", "")}) + "\n")
+                f.write(json.dumps({"cmd": "open", "tab": e.get("tab"), "conv": e.get("conv", ""),
+                                    "url": url}) + "\n")
         else:
             try:
-                os.startfile(f"https://chatgpt.com/c/{e['conv']}" if e.get("conv")
-                             else "https://chatgpt.com/")
+                os.startfile(url)
             except OSError:
                 pass
         return
@@ -854,7 +860,7 @@ class Tracker:
                     pass
 
     def web_event(self, rec):
-        """브라우저 확장(chatgpt.com)이 보낸 신호. 키는 탭 번호라서, 새 채팅이 답하는 도중
+        """브라우저 확장(chatgpt.com, gemini.google.com)이 보낸 신호. 키는 탭 번호라서, 새 채팅이 답하는 도중
         주소·제목이 바뀌어도 같은 줄로 이어진다."""
         d = rec.get("d") or {}
         tab = d.get("tab")
@@ -870,21 +876,25 @@ class Tracker:
                 del self.tasks[key]
                 self.dirty = True
             return
-        title = str(d.get("title") or "ChatGPT")[:80]
+        gemini = d.get("site") == "gemini"
+        title = str(d.get("title") or ("Gemini" if gemini else "ChatGPT"))[:80]
         conv = d.get("conv") or (e or {}).get("conv", "")
+        url = d.get("url") or (e or {}).get("url", "")
         if state == "working":
             if e is None or e.get("status") != "working":
                 if ts <= self.dismissed.get(key, 0):
                     return
-                self.tasks[key] = {"src": "chatweb", "id": str(tab), "tab": tab, "conv": conv,
-                                   "title": title, "prompt": "", "folder": "ChatGPT",
+                self.tasks[key] = {"src": "gemini" if gemini else "chatweb", "id": str(tab),
+                                   "tab": tab, "conv": conv, "url": url,
+                                   "title": title, "prompt": "",
+                                   "folder": "Gemini" if gemini else "ChatGPT",
                                    "start": ts, "status": "working"}
                 if live:
                     self.on_event("start", key)
             else:
-                e["title"], e["conv"] = title, conv
+                e.update(title=title, conv=conv, url=url)
         elif state == "done" and e and e.get("status") == "working":
-            e.update(status="done", end=ts, title=title, conv=conv)
+            e.update(status="done", end=ts, title=title, conv=conv, url=url)
             if live:
                 self.on_event("done", key)
         self.dirty = True
@@ -1341,7 +1351,9 @@ class Pet:
         elif n:
             srcs = {e.get("src") for e in self.tracker.tasks.values()
                     if e.get("status") == "working"}
-            badge = (BLUE if srcs and srcs <= {"codex", "chatgpt", "chatweb"} else ACCENT, str(n))
+            color = (PURPLE if srcs == {"gemini"} else
+                     BLUE if srcs and srcs <= {"codex", "chatgpt", "chatweb", "gemini"} else ACCENT)
+            badge = (color, str(n))
         elif "done" in st:
             badge = (GREEN, "✓")
         if badge:
