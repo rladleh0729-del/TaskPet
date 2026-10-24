@@ -112,9 +112,13 @@ function title() {
   return t && t !== S.plainTitle && t !== '새 세션' ? t.slice(0, 80) : '새 채팅';
 }
 
+const TITLE_WAIT = 60000; // 새 채팅은 답이 끝난 뒤에 제목이 붙기도 해서, 이만큼은 제목 변화를 더 본다
+
 let state = 'idle';
 let quietSince = 0;
 let lastSent = '';
+let doneAt = 0;           // 마지막으로 '끝남'을 알린 시각
+let doneConv = '';        // 그때의 대화 id (다른 대화로 옮겨 가면 제목 갱신을 보내지 않음)
 
 function report(s) {
   const msg = { type: 'state', site: SITE, state: s, conv: S.conv(), title: title(), url: location.href };
@@ -140,12 +144,26 @@ function check() {
     if (now - quietSince >= DONE_DELAY) {
       state = 'idle';
       report('done');
+      doneAt = now;
+      doneConv = S.conv();
     }
+  } else if (doneAt && now - doneAt < TITLE_WAIT) {
+    // 끝난 뒤 같은 대화(또는 새 채팅에 막 생긴 id)의 제목이 바뀌면 한 번 더 알림 (같은 내용이면 report가 거름)
+    const conv = S.conv();
+    if (conv === doneConv || !doneConv) report('done');
+    if (conv && !doneConv) doneConv = conv;
   }
 }
 
+// 답이 한 글자씩 나올 때마다 화면이 바뀌므로, 검사는 0.25초에 한 번으로 묶는다
+let pending = null;
+function scheduleCheck() {
+  if (pending) return;
+  pending = setTimeout(() => { pending = null; check(); }, 250);
+}
+
 // 화면이 바뀔 때마다 확인하고, 뒤쪽 탭에서 화면 갱신이 줄어드는 경우를 대비해 1초마다도 확인
-new MutationObserver(check).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'data-testid', 'class', 'fonticon', 'name'] });
+new MutationObserver(scheduleCheck).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'data-testid', 'class', 'fonticon', 'name'] });
 setInterval(check, 1000);
 check();
 

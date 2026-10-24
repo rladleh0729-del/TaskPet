@@ -4,6 +4,9 @@ const HOST = 'kr.querybot.taskpet';
 let port = null;
 let retry = null;
 let lastError = '';
+// 탭마다 마지막으로 받은 상태. TaskPet과 연결이 끊겼다 다시 붙으면 한꺼번에 다시 보낸다
+// (끊긴 사이에 보낸 상태가 사라지지 않게)
+const latest = {};
 
 function connect() {
   if (port) return;
@@ -15,6 +18,9 @@ function connect() {
     return;
   }
   port.onMessage.addListener(onHost);
+  for (const m of Object.values(latest)) {
+    try { port.postMessage(m); } catch (e) { /* 곧 onDisconnect 로 감 */ }
+  }
   port.onDisconnect.addListener(() => {
     // TaskPet이 설치 안 돼 있거나 등록이 잘못되면 여기로 온다
     lastError = (chrome.runtime.lastError && chrome.runtime.lastError.message) || '연결 끊김';
@@ -25,7 +31,13 @@ function connect() {
 }
 
 function send(msg) {
-  connect();
+  if (msg.type === 'state' && msg.tab !== undefined) {
+    if (msg.state === 'closed') delete latest[msg.tab];
+    else latest[msg.tab] = msg;
+  }
+  const fresh = !port;
+  connect();                       // 새로 연결되면 connect 안에서 latest 를 모두 보냄
+  if (fresh && port && msg.state !== 'closed') return;
   try { if (port) port.postMessage(msg); } catch (e) { port = null; }
 }
 
