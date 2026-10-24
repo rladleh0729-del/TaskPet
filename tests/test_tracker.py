@@ -170,6 +170,14 @@ assert tr.tasks["w:8"]["status"] == "done" and tr.tasks["w:8"]["url"].endswith("
 web("working", tab=10, site="kimi", title="안녕", url="https://www.kimi.ai/chat/k1")
 assert tr.tasks["w:10"]["src"] == "kimi" and taskpet.SRC_LABEL["kimi"] == "Kimi"
 
+# 브라우저 두 개: 같은 탭 번호라도 브라우저가 다르면 다른 줄, 닫기도 그 브라우저 것만
+web("working", tab=20, site="grok", title="그록 대화", browser="brave", browser_path=r"C:\b\brave.exe")
+web("working", tab=20, site="gemini", title="제미나이 대화", browser="chrome")
+assert tr.tasks["w:brave:20"]["title"] == "그록 대화" and tr.tasks["w:chrome:20"]["title"] == "제미나이 대화"
+assert tr.tasks["w:brave:20"]["browser_path"].endswith("brave.exe")
+web("closed", tab=20, browser="chrome")
+assert "w:chrome:20" not in tr.tasks and "w:brave:20" in tr.tasks
+
 # Claude 데스크톱 앱 일반 채팅: '실행 중' 목록으로 시작·완료, Code 탭(claude_ok=False)일 땐 판단 보류
 events.clear()
 cl = lambda ok, *w: tr.apply_chatgpt({"ok": False, "claude_ok": ok, "claude": list(w)})
