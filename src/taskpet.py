@@ -111,11 +111,17 @@ GREEN = "#4cc46a"
 RED = "#ff6b6b"
 BLUE = "#4ea1ff"
 PURPLE = "#a98bff"
-# Claude 주황, GPT 쪽 파랑, Gemini 보라
-SRC_COLOR = {"claude": ACCENT, "codex": BLUE, "chatgpt": BLUE, "chatweb": BLUE, "gemini": PURPLE}
-SRC_LABEL = {"claude": "Claude", "codex": "Codex", "chatgpt": "ChatGPT", "chatweb": "ChatGPT 웹",
-             "gemini": "Gemini"}
-WEB_SRCS = ("chatweb", "gemini")   # 브라우저 확장으로 잡는 것
+SILVER = "#cfd3dc"
+TEAL = "#3dd6c6"
+# Claude 주황, GPT 쪽 파랑, Gemini 보라, Grok 은색, Kimi 청록
+SRC_COLOR = {"claude": ACCENT, "claudeweb": ACCENT, "codex": BLUE, "chatgpt": BLUE,
+             "chatweb": BLUE, "gemini": PURPLE, "grok": SILVER, "kimi": TEAL}
+SRC_LABEL = {"claude": "Claude", "claudeweb": "Claude 웹", "codex": "Codex", "chatgpt": "ChatGPT",
+             "chatweb": "ChatGPT 웹", "gemini": "Gemini", "grok": "Grok", "kimi": "Kimi"}
+# 브라우저 확장이 보내는 사이트 이름 → (줄 종류, 이름)
+WEB_SITES = {"chatgpt": ("chatweb", "ChatGPT"), "gemini": ("gemini", "Gemini"),
+             "claude": ("claudeweb", "Claude"), "grok": ("grok", "Grok"), "kimi": ("kimi", "Kimi")}
+WEB_SRCS = tuple(src for src, _ in WEB_SITES.values())
 FONT = "맑은 고딕" if KO else "Segoe UI"
 
 # ---- 픽셀 로봇 (15 x 16) ----
@@ -860,7 +866,7 @@ class Tracker:
                     pass
 
     def web_event(self, rec):
-        """브라우저 확장(chatgpt.com, gemini.google.com)이 보낸 신호. 키는 탭 번호라서, 새 채팅이 답하는 도중
+        """브라우저 확장(chatgpt.com, gemini.google.com, claude.ai, grok.com, kimi.ai)이 보낸 신호. 키는 탭 번호라서, 새 채팅이 답하는 도중
         주소·제목이 바뀌어도 같은 줄로 이어진다."""
         d = rec.get("d") or {}
         tab = d.get("tab")
@@ -876,18 +882,17 @@ class Tracker:
                 del self.tasks[key]
                 self.dirty = True
             return
-        gemini = d.get("site") == "gemini"
-        title = str(d.get("title") or ("Gemini" if gemini else "ChatGPT"))[:80]
+        src, name = WEB_SITES.get(d.get("site"), WEB_SITES["chatgpt"])
+        title = str(d.get("title") or name)[:80]
         conv = d.get("conv") or (e or {}).get("conv", "")
         url = d.get("url") or (e or {}).get("url", "")
         if state == "working":
             if e is None or e.get("status") != "working":
                 if ts <= self.dismissed.get(key, 0):
                     return
-                self.tasks[key] = {"src": "gemini" if gemini else "chatweb", "id": str(tab),
+                self.tasks[key] = {"src": src, "id": str(tab),
                                    "tab": tab, "conv": conv, "url": url,
-                                   "title": title, "prompt": "",
-                                   "folder": "Gemini" if gemini else "ChatGPT",
+                                   "title": title, "prompt": "", "folder": name,
                                    "start": ts, "status": "working"}
                 if live:
                     self.on_event("start", key)
@@ -1351,9 +1356,9 @@ class Pet:
         elif n:
             srcs = {e.get("src") for e in self.tracker.tasks.values()
                     if e.get("status") == "working"}
-            color = (PURPLE if srcs == {"gemini"} else
-                     BLUE if srcs and srcs <= {"codex", "chatgpt", "chatweb", "gemini"} else ACCENT)
-            badge = (color, str(n))
+            # 진행 중인 것이 모두 같은 색이면 그 색, 섞여 있으면 기본 주황
+            colors = {SRC_COLOR.get(s, ACCENT) for s in srcs}
+            badge = (colors.pop() if len(colors) == 1 else ACCENT, str(n))
         elif "done" in st:
             badge = (GREEN, "✓")
         if badge:
