@@ -29,16 +29,29 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
 GPT_EXE = "taskpet-chatgpt.exe"
+NATIVE_EXE = "taskpet-native.exe"
+NATIVE_NAME = "kr.querybot.taskpet"
+# 확장 'TaskPet for ChatGPT'의 ID (manifest.json의 key로 고정됨)
+EXT_IDS = ["dmbfmfooilahmdclgfkkkdnpickfbilm"]
+NATIVE_KEYS = [r"Software\Google\Chrome\NativeMessagingHosts",
+               r"Software\Chromium\NativeMessagingHosts",
+               r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
+               r"Software\Microsoft\Edge\NativeMessagingHosts"]
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 EVENTS = os.path.join(APP_DIR, "events.jsonl")
 STATE = os.path.join(APP_DIR, "state.json")
 QUIT_FLAG = os.path.join(APP_DIR, "quit.flag")
+WEB_CMD = os.path.join(APP_DIR, "web-cmd.jsonl")   # 로봇 → 브라우저 확장 (탭 열기)
+# Claude 데스크톱은 MSIX 앱이라 그 안에서 실행된 훅이 쓰는 %LOCALAPPDATA% 는
+# Packages\<앱>\LocalCache\Local 로 옮겨진다 (바깥 프로그램에는 안 보임). 그쪽 신호 파일도 읽는다.
+PKG_EVENTS = os.path.join(os.environ.get("LOCALAPPDATA", HOME), "Packages", "*",
+                          "LocalCache", "Local", APP, "events.jsonl")
 CLAUDE_DIR = os.path.join(HOME, ".claude")
 CODEX_DIR = os.path.join(HOME, ".codex")
 NO_WINDOW = 0x08000000
@@ -97,8 +110,8 @@ ACCENT = "#f5942b"
 GREEN = "#4cc46a"
 RED = "#ff6b6b"
 BLUE = "#4ea1ff"
-SRC_COLOR = {"claude": ACCENT, "codex": BLUE, "chatgpt": BLUE}   # Claude 주황, GPT 쪽 파랑
-SRC_LABEL = {"claude": "Claude", "codex": "Codex", "chatgpt": "ChatGPT"}
+SRC_COLOR = {"claude": ACCENT, "codex": BLUE, "chatgpt": BLUE, "chatweb": BLUE}   # Claude 주황, GPT 쪽 파랑
+SRC_LABEL = {"claude": "Claude", "codex": "Codex", "chatgpt": "ChatGPT", "chatweb": "ChatGPT 웹"}
 FONT = "맑은 고딕" if KO else "Segoe UI"
 
 # ---- 픽셀 로봇 (15 x 16) ----
@@ -246,6 +259,32 @@ def make_startup_shortcut(exe):
     return os.path.exists(STARTUP_LNK)
 
 
+def register_native_host():
+    """브라우저 확장이 taskpet-native.exe를 부를 수 있게 Chrome·Brave·Edge에 등록한다."""
+    manifest = os.path.join(INSTALL_DIR, NATIVE_NAME + ".json")
+    write_json(manifest, {
+        "name": NATIVE_NAME,
+        "description": "TaskPet ChatGPT web notifier",
+        "path": os.path.join(INSTALL_DIR, NATIVE_EXE),
+        "type": "stdio",
+        "allowed_origins": [f"chrome-extension://{i}/" for i in EXT_IDS],
+    })
+    for base in NATIVE_KEYS:
+        try:
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base + "\\" + NATIVE_NAME) as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, manifest)
+        except OSError:
+            pass
+
+
+def unregister_native_host():
+    for base in NATIVE_KEYS:
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, base + "\\" + NATIVE_NAME)
+        except OSError:
+            pass
+
+
 def remove_run_value():
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
@@ -350,7 +389,19 @@ def copy_retry(src, dst):
             return
         except PermissionError:
             time.sleep(0.2)
+    # 브라우저가 붙잡고 있는 연결 프로그램 등은 안 꺼지므로, 옛 파일 이름을 바꿔 비켜 두고 복사한다
+    # (실행 중인 exe도 이름 바꾸기는 됨. 비켜 둔 파일은 다음 설치 때 지움)
+    old = f"{dst}.{int(time.time())}.old"
+    os.replace(dst, old)
     shutil.copy2(src, dst)
+
+
+def remove_old_copies(folder):
+    for p in glob.glob(os.path.join(folder, "*.old")):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
 
 
 def install():
@@ -366,10 +417,17 @@ def _install():
     stop_running_widget(INSTALL_DIR)
     exe = os.path.join(INSTALL_DIR, "TaskPet.exe")
     updating = os.path.exists(exe)
+    remove_old_copies(INSTALL_DIR)
     copy_retry(sys.executable, exe)
     hook = os.path.join(INSTALL_DIR, HOOK_EXE)
     copy_retry(os.path.join(sys._MEIPASS, HOOK_EXE), hook)
     copy_retry(os.path.join(sys._MEIPASS, GPT_EXE), os.path.join(INSTALL_DIR, GPT_EXE))
+    copy_retry(os.path.join(sys._MEIPASS, NATIVE_EXE), os.path.join(INSTALL_DIR, NATIVE_EXE))
+    register_native_host()
+    # 브라우저 확장(압축 해제본)도 설치 폴더에 넣어 둔다 → 브라우저에서 '압축해제된 확장 로드'로 고르면 됨
+    ext_src = os.path.join(sys._MEIPASS, "chrome-extension")
+    if os.path.isdir(ext_src):
+        shutil.copytree(ext_src, os.path.join(INSTALL_DIR, "chrome-extension"), dirs_exist_ok=True)
 
     result = install_claude_hooks(hook)
 
@@ -388,7 +446,9 @@ def _install():
 
     if result == "bad":
         msgbox(t("bad_settings"), 0x30)
-    subprocess.Popen([exe], cwd=INSTALL_DIR, creationflags=0x00000008)
+    # 설치 프로그램의 임시 폴더를 물려받지 않고 새로 시작하도록 (PyInstaller 6.10+)
+    env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+    subprocess.Popen([exe], cwd=INSTALL_DIR, creationflags=0x00000008, env=env)
     if updating:
         msgbox(t("updated"))
     else:
@@ -402,6 +462,7 @@ def uninstall(ask=True, from_widget=False):
         stop_running_widget(INSTALL_DIR)
     remove_claude_hooks()
     remove_run_value()
+    unregister_native_host()
     try:
         os.remove(STARTUP_LNK)
     except OSError:
@@ -494,6 +555,21 @@ GPT = None   # Pet이 띄운 ChatGptWatcher
 
 
 def open_task(key, e):
+    if e.get("src") == "chatweb":
+        # 브라우저가 켜져 있으면 연결 프로그램을 거쳐 그 탭을 앞으로, 아니면 그 대화를 새로 연다
+        host_alive = subprocess.run(
+            ["tasklist", "/fi", f"imagename eq {NATIVE_EXE}", "/nh"], capture_output=True,
+            creationflags=NO_WINDOW).stdout.decode("cp949", "ignore").lower().find(NATIVE_EXE) >= 0
+        if host_alive:
+            with open(WEB_CMD, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"cmd": "open", "tab": e.get("tab"), "conv": e.get("conv", "")}) + "\n")
+        else:
+            try:
+                os.startfile(f"https://chatgpt.com/c/{e['conv']}" if e.get("conv")
+                             else "https://chatgpt.com/")
+            except OSError:
+                pass
+        return
     if e.get("src") == "chatgpt":
         if GPT:
             GPT.open(e.get("title", ""))
@@ -513,11 +589,17 @@ def open_task(key, e):
 # ======================================================================
 # 작업 상태 추적
 # ======================================================================
+IMAGE_MARK = re.compile(r"\[(?:Image|이미지)[^\]]*\]", re.I)
+
+
 def clean_prompt(p):
+    """보여 줄 질문 글. 시스템 자동 메시지면 None(직전 질문 유지), 글 없이 이미지만 보냈으면 '(이미지)'."""
     p = " ".join(str(p or "").split())
     if p.startswith("<") or "system-reminder" in p:
-        return ""
-    return p[:80]
+        return None
+    p = " ".join(IMAGE_MARK.sub(" ", p).split())
+    # 글이 하나도 없으면 이미지(또는 파일)만 보낸 것
+    return p[:80] if p else "(이미지)"
 
 
 BG_START = re.compile(rb"Command running in background with ID: ([A-Za-z0-9]+)"
@@ -595,6 +677,7 @@ class Tracker:
         saved = read_json(STATE, {})
         self.tasks = saved.get("tasks", {})
         self.ev_off = saved.get("events_offset", 0)
+        self.pkg_off = saved.get("pkg_offsets", {})   # 앱 가상 공간 신호 파일 → 읽은 위치
         # 사용자가 지운 Codex 줄: 키 → 지운 시각. Codex 기록은 다시 읽으므로 이보다 옛 일은 무시
         now = time.time()
         self.dismissed = {k: v for k, v in saved.get("dismissed", {}).items()
@@ -615,6 +698,7 @@ class Tracker:
             try:
                 write_json(STATE, {"tasks": self.tasks,
                                    "events_offset": self.ev_off,
+                                   "pkg_offsets": self.pkg_off,
                                    "dismissed": self.dismissed})
             except OSError:
                 pass
@@ -649,6 +733,9 @@ class Tracker:
             return          # ChatGPT 창이 없으면 판단을 미룬다
         now = time.time()
         codex = self.codex_title_set()
+        # 브라우저에서 돌리는 대화가 데스크톱 앱 목록에도 '작업 중'으로 보이면 한 번만 띄운다
+        codex.update(e.get("title", "") for e in self.tasks.values()
+                     if e.get("src") == "chatweb" and e.get("status") == "working")
         cur = {t for t in report.get("working") or [] if t and t not in codex}
         first = self.gpt_working is None
         prev = set() if first else self.gpt_working
@@ -688,6 +775,7 @@ class Tracker:
 
     # ---- Claude Code ----
     def read_claude_events(self):
+        self.read_pkg_events()
         try:
             size = os.path.getsize(EVENTS)
         except OSError:
@@ -724,7 +812,86 @@ class Tracker:
             except OSError:
                 pass
 
+    def read_pkg_events(self):
+        for p in glob.glob(PKG_EVENTS):
+            try:
+                if os.path.samefile(p, EVENTS):   # 로봇도 같은 앱 안에서 도는 경우
+                    continue
+            except OSError:
+                pass
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                continue
+            off = self.pkg_off.get(p)
+            if off is None or size < off:
+                # 처음 본 파일은 옛 기록을 건너뛴다 (지난 일로 소리가 나지 않게)
+                off = size if off is None else 0
+                self.pkg_off[p] = off
+                self.dirty = True
+            if size <= off:
+                continue
+            with open(p, "rb") as f:
+                f.seek(off)
+                data = f.read()
+            end = data.rfind(b"\n") + 1
+            self.pkg_off[p] = off + end
+            self.dirty = True
+            for line in data[:end].splitlines():
+                try:
+                    self.claude_event(json.loads(line.decode("utf-8", "ignore")))
+                except Exception:
+                    pass
+            # 다 읽은 큰 파일은 비운다 (지우면 앱 쪽이 실제 파일을 복사해 와서 이어 쓰므로 자르기만)
+            if off + end == size > 512 * 1024:
+                try:
+                    with open(p, "r+b") as f:
+                        f.seek(0, 2)
+                        if f.tell() == size:
+                            f.truncate(0)
+                            self.pkg_off[p] = 0
+                except OSError:
+                    pass
+
+    def web_event(self, rec):
+        """브라우저 확장(chatgpt.com)이 보낸 신호. 키는 탭 번호라서, 새 채팅이 답하는 도중
+        주소·제목이 바뀌어도 같은 줄로 이어진다."""
+        d = rec.get("d") or {}
+        tab = d.get("tab")
+        if tab is None:
+            return
+        ts = rec.get("t", 0) / 1000
+        live = time.time() - ts < 30
+        key = f"w:{tab}"
+        e = self.tasks.get(key)
+        state = d.get("state")
+        if state == "closed":
+            if e:
+                del self.tasks[key]
+                self.dirty = True
+            return
+        title = str(d.get("title") or "ChatGPT")[:80]
+        conv = d.get("conv") or (e or {}).get("conv", "")
+        if state == "working":
+            if e is None or e.get("status") != "working":
+                if ts <= self.dismissed.get(key, 0):
+                    return
+                self.tasks[key] = {"src": "chatweb", "id": str(tab), "tab": tab, "conv": conv,
+                                   "title": title, "prompt": "", "folder": "ChatGPT",
+                                   "start": ts, "status": "working"}
+                if live:
+                    self.on_event("start", key)
+            else:
+                e["title"], e["conv"] = title, conv
+        elif state == "done" and e and e.get("status") == "working":
+            e.update(status="done", end=ts, title=title, conv=conv)
+            if live:
+                self.on_event("done", key)
+        self.dirty = True
+
     def claude_event(self, rec):
+        if rec.get("ev") == "web":
+            return self.web_event(rec)
         ev, d = rec.get("ev"), rec.get("d") or {}
         ts = rec.get("t", 0) / 1000
         sid = d.get("session_id")
@@ -735,8 +902,8 @@ class Tracker:
         e = self.tasks.get(key)
         if ev == "start":
             prompt = clean_prompt(d.get("prompt"))
-            if not prompt and e:
-                prompt = e.get("prompt", "")
+            if prompt is None:            # 자동 메시지 → 직전 질문 그대로
+                prompt = (e or {}).get("prompt", "")
             self.tasks[key] = {
                 "src": "claude", "id": sid,
                 "title": claude_title(d) or (e or {}).get("title", ""),
@@ -1174,7 +1341,7 @@ class Pet:
         elif n:
             srcs = {e.get("src") for e in self.tracker.tasks.values()
                     if e.get("status") == "working"}
-            badge = (BLUE if srcs and srcs <= {"codex", "chatgpt"} else ACCENT, str(n))
+            badge = (BLUE if srcs and srcs <= {"codex", "chatgpt", "chatweb"} else ACCENT, str(n))
         elif "done" in st:
             badge = (GREEN, "✓")
         if badge:
