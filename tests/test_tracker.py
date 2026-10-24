@@ -178,6 +178,14 @@ assert tr.tasks["w:brave:20"]["browser_path"].endswith("brave.exe")
 web("closed", tab=20, browser="chrome")
 assert "w:chrome:20" not in tr.tasks and "w:brave:20" in tr.tasks
 
+# 끝난 뒤에 붙은 제목은 소리 없이 고쳐짐
+events.clear()
+web("working", tab=21, site="chatgpt", title="새 채팅", browser="brave")
+web("done", tab=21, site="chatgpt", title="새 채팅", browser="brave")
+web("done", tab=21, site="chatgpt", title="여행 계획", conv="c9", browser="brave")
+assert tr.tasks["w:brave:21"]["title"] == "여행 계획" and tr.tasks["w:brave:21"]["conv"] == "c9"
+assert events == ["start", "done"], events
+
 # Claude 데스크톱 앱 일반 채팅: '실행 중' 목록으로 시작·완료, Code 탭(claude_ok=False)일 땐 판단 보류
 events.clear()
 cl = lambda ok, *w: tr.apply_chatgpt({"ok": False, "claude_ok": ok, "claude": list(w)})
