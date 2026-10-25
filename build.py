@@ -16,24 +16,12 @@ WPF = r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF"
 
 
 def make_icon(path):
-    """로봇 도트를 그대로 아이콘으로."""
-    src = open(os.path.join(SRC, "taskpet.py"), encoding="utf-8").read()
-    start = src.index("IDLE = [")
-    end = src.index("]", start) + 1
-    ns = {}
-    exec(src[start:end], ns)
-    grid = ns["IDLE"]
-    palette = {"O": "#f5942b", "D": "#a85a0e", "F": "#2a2230",
-               "M": "#ffb15e", "E": "#ffd84d"}
-    n = 16
-    img = Image.new("RGBA", (n * 16, n * 16), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    ox = (n - len(grid[0])) // 2
-    for y, row in enumerate(grid):
-        for x, ch in enumerate(row):
-            if ch != ".":
-                d.rectangle([(x + ox) * 16, y * 16, (x + ox + 1) * 16 - 1, (y + 1) * 16 - 1],
-                            fill=palette[ch])
+    """화면 로봇과 같은 그림을 아이콘으로 (정사각형 가운데에)."""
+    sys.path.insert(0, SRC)
+    from taskpet import robot_image
+    bot = robot_image("idle", 240, 256, hard=False)
+    img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    img.paste(bot, (8, 0), bot)
     img.save(path, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64),
                           (128, 128), (256, 256)])
 
@@ -57,7 +45,7 @@ def main():
     subprocess.run([CSC, "/nologo", "/codepage:65001", "/optimize+", "/target:exe",
                     f"/out:{gpt}", f"/win32icon:{icon}",
                     rf"/r:{WPF}\UIAutomationClient.dll", rf"/r:{WPF}\UIAutomationTypes.dll",
-                    rf"/r:{WPF}\WindowsBase.dll",
+                    rf"/r:{WPF}\WindowsBase.dll", "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
                     os.path.join(SRC, "chatgpt_watch.cs")], check=True)
     print("ChatGPT 감시 완료")
 
