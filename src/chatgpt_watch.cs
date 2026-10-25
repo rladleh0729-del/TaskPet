@@ -7,6 +7,7 @@
 //               "claude_ok":true,"claude_hwnd":5678,"claude":["제목",...]}   (바뀔 때, 그리고 30초마다)
 //     ok / claude_ok 가 false 면 그 앱 창이 없거나 채팅 목록이 안 보이는 화면 → 판단을 미룬다
 //   표준 입력: open<TAB>제목 / openclaude<TAB>제목   → 그 대화 줄을 눌러 연다 (로봇에서 더블 클릭했을 때만)
+//              replyclaude<TAB>세션 제목<TAB>글(base64) → Claude 앱 그 Code 세션에 글을 넣어 보냄 (로봇에서 선택지를 눌렀을 때만)
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -140,6 +141,107 @@ class ChatGptWatch
         }
     }
 
+    // ---- Claude 앱 Code 세션에 답 보내기 (창을 앞으로 가져오지 않음) ----
+    static AutomationElement ByName(AutomationElement w, string name, ControlType type)
+    {
+        var cond = new AndCondition(
+            new PropertyCondition(AutomationElement.NameProperty, name),
+            new PropertyCondition(AutomationElement.ControlTypeProperty, type));
+        return w.FindFirst(TreeScope.Descendants, cond);
+    }
+
+    // 지금 화면의 세션 제목 = "제목, 세션 이름 바꾸기" 버튼
+    static string CurrentSession(AutomationElement w)
+    {
+        var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
+        foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
+        {
+            string n;
+            try { n = b.Current.Name ?? ""; } catch { continue; }
+            foreach (var tail in new[] { ", 세션 이름 바꾸기", ", Rename session" })
+                if (n.EndsWith(tail)) return n.Substring(0, n.Length - tail.Length);
+        }
+        return null;
+    }
+
+    // 왼쪽 목록의 세션 줄 (이름이 제목과 같거나 "제목 Claude 시작 위치: …"처럼 뒤에 덧붙은 것)
+    static AutomationElement SessionRow(AutomationElement w, string title)
+    {
+        var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
+        foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
+        {
+            try
+            {
+                string n = b.Current.Name ?? "";
+                if ((n == title || n.StartsWith(title + " ")) && IsClaudeRow(b)) return b;
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    static bool Press(AutomationElement e)
+    {
+        object p;
+        if (e == null || !e.TryGetCurrentPattern(InvokePattern.Pattern, out p)) return false;
+        ((InvokePattern)p).Invoke();
+        return true;
+    }
+
+    // 그 세션으로 화면을 바꾸고(필요하면) 입력창에 글을 넣어 '보내기'를 누른 뒤, 원래 보던 세션으로 돌려놓는다.
+    // 돌려주는 값: "ok" 또는 사용자에게 보여 줄 이유
+    static string Reply(string title, string text)
+    {
+        var wins = AppWindows("claude");
+        if (wins.Count == 0) return "Claude 앱이 열려 있지 않아요";
+        var w = wins[0];
+        w.FindAll(TreeScope.Descendants, Condition.TrueCondition);   // 처음 읽을 땐 일부만 보여서 한 번 깨운다
+        string back = CurrentSession(w);
+        if (back == null) return "Claude 앱을 Code 화면으로 두고 다시 보내 주세요";
+        if (back != title)
+        {
+            if (!Press(SessionRow(w, title))) return "Claude 앱 목록에서 그 세션을 찾지 못했어요";
+            for (int i = 0; i < 30 && CurrentSession(w) != title; i++) Thread.Sleep(100);
+            if (CurrentSession(w) != title) return "그 세션으로 바꾸지 못했어요";
+            Thread.Sleep(300);
+        }
+        else back = null;                 // 이미 그 세션이면 돌아갈 필요 없음
+        string result;
+        var ed = ByName(w, "프롬프트", ControlType.Edit);
+        object vpo;
+        if (ed == null || !ed.TryGetCurrentPattern(ValuePattern.Pattern, out vpo)) result = "입력창을 찾지 못했어요";
+        else
+        {
+            var vp = (ValuePattern)vpo;
+            if ((vp.Current.Value ?? "").Trim().Length > 0)
+                result = "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
+            else
+            {
+                vp.SetValue(text);
+                Thread.Sleep(300);
+                string head = text.Trim();
+                head = head.Substring(0, Math.Min(10, head.Length));
+                if (!(vp.Current.Value ?? "").Contains(head)) result = "입력창에 글을 넣지 못했어요";
+                else
+                {
+                    var send = ByName(w, "보내기", ControlType.Button) ?? ByName(w, "Send", ControlType.Button);
+                    if (send == null || !send.Current.IsEnabled || !Press(send))
+                    {
+                        result = "보내기 버튼을 누르지 못했어요";
+                        try { vp.SetValue(""); } catch { }
+                    }
+                    else result = "ok";
+                }
+            }
+        }
+        if (back != null)
+        {
+            Thread.Sleep(500);
+            Press(SessionRow(w, back));      // 원래 보던 세션으로 화면을 돌려놓음
+        }
+        return result;
+    }
+
     static long Hwnd(List<AutomationElement> wins)
     {
         foreach (var w in wins)
@@ -182,6 +284,16 @@ class ChatGptWatch
             {
                 if (cmd != null && cmd.StartsWith("open\t")) Open("ChatGPT", IsGptRow, cmd.Substring(5));
                 if (cmd != null && cmd.StartsWith("openclaude\t")) Open("claude", IsClaudeRow, cmd.Substring(11));
+                if (cmd != null && cmd.StartsWith("replyclaude\t"))
+                {
+                    // replyclaude<TAB>세션 제목<TAB>보낼 글(base64, UTF-8) → {"reply":"ok"} 또는 {"reply":"이유"}
+                    var parts = cmd.Split('\t');
+                    string r;
+                    try { r = Reply(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))); }
+                    catch (Exception ex) { r = "보내는 중 오류: " + ex.Message; }
+                    Console.Out.WriteLine("{\"reply\":" + Json(r) + "}");
+                    Console.Out.Flush();
+                }
             }
             catch { }
 

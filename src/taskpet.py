@@ -8,6 +8,7 @@
 #
 # Claude Code: 훅(taskpet-hook.exe)이 events.jsonl에 신호를 적으면 여기서 읽는다.
 # Codex(ChatGPT 앱·CLI): ~/.codex/sessions 기록 파일을 지켜본다 (설정 변경 없음).
+import base64
 import ctypes
 import glob
 import json
@@ -32,7 +33,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.5"
+VERSION = "1.4.6"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -78,6 +79,13 @@ T = {
     "quit": ("종료", "Quit"),
     "mute": ("소리 끄기", "Mute sounds"),
     "ext_menu": ("브라우저 확장 받기", "Get browser extension"),
+    "reply_other": ("기타", "Other"),
+    "reply_send": ("보내기", "Send"),
+    "reply_sending": ("보내는 중…", "sending…"),
+    "reply_fail": ("답을 보내지 못했습니다.\n{e}", "Could not send the answer.\n{e}"),
+    "reply_nohelper": ("감시 프로그램이 꺼져 있어요", "The helper is not running"),
+    "reply_notitle": ("이 세션은 이름이 없어서 찾을 수 없어요. Claude 앱에서 답해 주세요.",
+                      "This session has no name, so it can't be found. Please answer in the Claude app."),
     "ext_done": ("확장 폴더를 받았습니다:\n{p}\n\n(폴더 주소는 복사해 두었습니다)\n\n"
                  "1. 브라우저 주소창에 chrome://extensions 입력\n"
                  "   (Brave는 brave://extensions, Edge는 edge://extensions)\n"
@@ -628,10 +636,31 @@ class ChatGptWatcher:
     def _read(self):
         for line in self.proc.stdout:
             try:
-                self.report = json.loads(line.decode("utf-8", "ignore"))
-                self.fresh = True
+                obj = json.loads(line.decode("utf-8", "ignore"))
             except Exception:
-                pass
+                continue
+            if "reply" in obj:            # 답 보내기 결과
+                self.reply_result = obj["reply"]
+            else:
+                self.report = obj
+                self.fresh = True
+
+    def reply(self, title, text):
+        """Claude 앱의 그 Code 세션에 글을 넣어 보낸다 (창은 앞으로 가져오지 않음). 결과는 take_reply()."""
+        self.reply_result = None
+        if not (self.proc and self.proc.poll() is None):
+            self.reply_result = t("reply_nohelper")
+            return
+        b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        try:
+            self.proc.stdin.write(f"replyclaude\t{title}\t{b64}\n".encode("utf-8"))
+            self.proc.stdin.flush()
+        except OSError:
+            self.reply_result = t("reply_nohelper")
+
+    def take_reply(self):
+        r, self.reply_result = getattr(self, "reply_result", None), None
+        return r
 
     def take(self):
         if not self.fresh:
@@ -883,14 +912,16 @@ def claude_bg_pending(transcript):
 
 def claude_turn_asks(transcript, since):
     """이번 턴이 사용자에게 질문(데스크톱 앱 아래 상자의 선택 버튼)을 남기고 끝났는지 본다.
-    이때는 Claude Code가 승인 대기 신호를 보내지 않으므로 기록을 직접 읽는다."""
+    이때는 Claude Code가 승인 대기 신호를 보내지 않으므로 기록을 직접 읽는다.
+    질문이 있으면 {"ask": 질문, "choices": [{"label", "message"}, ...]}, 없으면 None.
+    choices 는 글로 답하는 버튼만 (커밋·PR 같은 앱 동작 버튼은 로봇에서 누를 수 없어 뺀다)."""
     try:
         size = os.path.getsize(transcript)
         with open(transcript, "rb") as f:
             f.seek(max(0, size - 600_000))
             tail = f.read()
     except OSError:
-        return False
+        return None
     for line in reversed(tail.splitlines()):
         if b'"mcp__ccd_turn__wrap_up"' not in line:
             continue
@@ -900,13 +931,25 @@ def claude_turn_asks(transcript, since):
         except Exception:
             continue
         if ts < since - 2:
-            return False          # 이번 턴 전에 한 것
+            return None           # 이번 턴 전에 한 것
         for part in (rec.get("message") or {}).get("content") or []:
-            if (isinstance(part, dict) and part.get("name") == "mcp__ccd_turn__wrap_up"
-                    and str((part.get("input") or {}).get("ask") or "").strip()):
-                return True
-        return False
-    return False
+            inp = part.get("input") if isinstance(part, dict) else None
+            if (part.get("name") == "mcp__ccd_turn__wrap_up" and isinstance(inp, dict)
+                    and str(inp.get("ask") or "").strip()):
+                acts = inp.get("actions")
+                if isinstance(acts, str):          # 버튼 목록이 글(JSON)로 들어오기도 함
+                    try:
+                        acts = json.loads(acts)
+                    except ValueError:
+                        acts = []
+                choices = []
+                for a in acts if isinstance(acts, list) else []:
+                    if isinstance(a, dict) and not a.get("action") and a.get("label"):
+                        choices.append({"label": str(a["label"])[:24],
+                                        "message": str(a.get("message") or a["label"])})
+                return {"ask": str(inp["ask"]).strip()[:120], "choices": choices}
+        return None
+    return None
 
 
 def claude_title(d):
@@ -1220,16 +1263,20 @@ class Tracker:
                 self.on_event("start", key)
             elif e.get("status") == "waiting":
                 e["status"] = "working"
-                e.pop("wait_start", None)
+                for k in ("wait_start", "ask", "choices", "sending"):
+                    e.pop(k, None)
         elif ev == "stop":
             if e and e.get("status") in ("working", "waiting"):
-                e.pop("wait_start", None)
+                for k in ("wait_start", "ask", "choices", "sending"):
+                    e.pop(k, None)
                 e["title"] = claude_title(d) or e.get("title", "")
                 tp = d.get("transcript_path") or e.get("transcript", "")
                 bg = claude_bg_pending(tp) if live else 0
-                if live and claude_turn_asks(tp, e.get("start", ts)):
+                asks = claude_turn_asks(tp, e.get("start", ts)) if live else None
+                if asks:
                     e["status"] = "waiting"   # 답을 기다리며 멈춤
                     e["wait_start"] = ts
+                    e["ask"], e["choices"] = asks["ask"], asks["choices"]
                     e.pop("bg", None)
                     self.on_event("wait", key)
                 elif bg:
@@ -1289,9 +1336,11 @@ class Tracker:
                         e["bg"] = bg
                     else:
                         e.pop("bg", None)
-                        if claude_turn_asks(e["transcript"], e.get("start", 0)):
+                        asks = claude_turn_asks(e["transcript"], e.get("start", 0))
+                        if asks:
                             e["status"] = "waiting"
                             e["wait_start"] = time.time()
+                            e["ask"], e["choices"] = asks["ask"], asks["choices"]
                             self.on_event("wait", key)
             if e.get("src") == "claude" and not e.get("title") and e.get("transcript"):
                 title = claude_title({"transcript_path": e["transcript"],
@@ -1473,6 +1522,9 @@ class Pet:
         self._pos_sig = None
         self._infos = []
         self._icons = {}
+        self.reply_open = None        # '기타'로 입력칸을 연 줄
+        self.reply_key = None         # 답을 보내는 중인 줄
+        self.reply_var = tk.StringVar(self.root)
         # 사용자 설정: 로봇 위치, 소리 끄기
         global MUTED
         self.settings = read_json(SETTINGS, {})
@@ -1626,6 +1678,9 @@ class Pet:
             rep = GPT.take() if GPT else None
             if rep:
                 self.tracker.apply_chatgpt(rep)
+            res = GPT.take_reply() if GPT else None
+            if res:
+                self.reply_done(res)
             self.tracker.poll()
             self.updater.tick()
             found = self.updater.take()
@@ -1722,7 +1777,9 @@ class Pet:
 
         sig = (compact, len(items) > 8, tuple(
             (k, e.get("status"), e.get("title", ""),
-             "" if compact else e.get("prompt", "")) for k, e in shown))
+             "" if compact else e.get("prompt", ""),
+             e.get("ask", ""), tuple(c["label"] for c in e.get("choices") or []),
+             bool(e.get("sending")), self.reply_open == k) for k, e in shown))
         if not force and sig == self._bub_sig:
             for k, lbl in self._infos:     # 시간 글자만 바꿔 깜빡임 방지
                 e = self.tracker.tasks.get(k)
@@ -1775,6 +1832,8 @@ class Pet:
             for w in widgets:
                 w.bind("<Button-1>", lambda ev, k=key: self.row_click(k))
                 w.configure(cursor="hand2")
+            if status == "waiting" and e.get("src") == "claude" and e.get("ask"):
+                self.add_choices(row, key, e)
             # 마우스를 올린 줄은 배경을 살짝 밝게 (더블 클릭할 줄이 어느 것인지 보이게)
             parts = widgets + [x]
             for w in parts:
@@ -1784,6 +1843,82 @@ class Pet:
             tk.Label(self.bub_box, text=t("more", n=len(items) - 8), bg=INNER,
                      fg=SUB, font=(FONT, 8)).pack(anchor="w", padx=S(2))
         self.show_bubble()
+
+    # ---- 선택지 질문에 답하기 ----
+    def chip(self, parent, text, command, sub=False):
+        """작은 버튼 (말풍선이 투명 창이라 Label로 만들고 누르면 command)."""
+        base = "#2a2331" if sub else "#3a3042"
+        b = tk.Label(parent, text=text, bg=base, fg=SUB if sub else FG, font=(FONT, 8, "bold"),
+                     padx=S(7), pady=S(2), cursor="hand2")
+        b.pack(side="left", padx=(0, S(4)))
+        b.bind("<Button-1>", lambda ev: command())
+        b.bind("<Enter>", lambda ev: b.configure(bg=ACCENT, fg="#1b1c20"))
+        b.bind("<Leave>", lambda ev: b.configure(bg=base, fg=SUB if sub else FG))
+        return b
+
+    def add_choices(self, row, key, e):
+        box = tk.Frame(row, bg=INNER)
+        box.pack(fill="x", pady=(S(2), 0))
+        tk.Label(box, text=e["ask"], bg=INNER, fg=FG, font=(FONT, 8), anchor="w",
+                 justify="left", wraplength=S(260)).pack(fill="x")
+        if e.get("sending"):
+            tk.Label(box, text=t("reply_sending"), bg=INNER, fg=SUB,
+                     font=(FONT, 8)).pack(anchor="w")
+            return
+        btns = tk.Frame(box, bg=INNER)
+        btns.pack(anchor="w", pady=(S(3), 0))
+        for c in e.get("choices") or []:
+            self.chip(btns, c["label"], lambda m=c["message"]: self.send_reply(key, m))
+        self.chip(btns, t("reply_other"), lambda: self.open_other(key), sub=True)
+        if self.reply_open == key:
+            f = tk.Frame(box, bg=INNER)
+            f.pack(fill="x", pady=(S(3), 0))
+            ent = tk.Entry(f, textvariable=self.reply_var, bg="#2e2636", fg=FG,
+                           insertbackground=FG, relief="flat", font=(FONT, 9), width=26)
+            ent.pack(side="left", fill="x", expand=True, ipady=S(2), padx=(0, S(4)))
+            ent.bind("<Return>", lambda ev: self.send_reply(key, self.reply_var.get()))
+            ent.bind("<Escape>", lambda ev: self.open_other(None))
+            self.chip(f, t("reply_send"), lambda: self.send_reply(key, self.reply_var.get()))
+            self.root.after(60, lambda: self.focus_entry(ent))
+
+    def focus_entry(self, ent):
+        # 투명 창은 그냥은 키보드를 못 받아서, 말풍선 창을 앞으로 올린 뒤 입력칸에 커서를 둔다
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.bubble.winfo_id())
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            self.bubble.focus_force()
+            ent.focus_set()
+            ent.icursor("end")
+        except tk.TclError:
+            pass
+
+    def open_other(self, key):
+        self.reply_open = key
+        self.update_bubble(force=True)
+
+    def send_reply(self, key, text):
+        e = self.tracker.tasks.get(key)
+        text = (text or "").strip()
+        if not e or not text or not GPT:
+            return
+        if not e.get("title"):
+            threading.Thread(target=msgbox, args=(t("reply_notitle"),), daemon=True).start()
+            return
+        e["sending"] = True
+        self.reply_key, self.reply_open = key, None
+        self.reply_var.set("")
+        GPT.reply(e["title"], text)
+        self.update_bubble(force=True)
+
+    def reply_done(self, result):
+        # 성공하면 곧 Claude Code가 새 턴을 시작해(훅 신호) 줄이 '진행 중'으로 바뀐다
+        e = self.tracker.tasks.get(self.reply_key)
+        if result != "ok":
+            if e:
+                e.pop("sending", None)
+            threading.Thread(target=msgbox, args=(t("reply_fail", e=result), 0x30),
+                             daemon=True).start()
+            self.update_bubble(force=True)
 
     def icon(self, src):
         kind = ICON_KIND.get(src, "claude")
