@@ -82,6 +82,25 @@ with open(transcript, "a", encoding="utf-8") as f:
          "input": {"recap": "끝", "ask": "2라운드 더 돌릴까요?"}}]}}) + "\n")
 ev("stop")
 assert tr.tasks["c:s1"]["status"] == "waiting", tr.tasks["c:s1"]
+assert tr.tasks["c:s1"]["ask"] == "2라운드 더 돌릴까요?" and tr.tasks["c:s1"]["choices"] == []
+
+# 선택지 버튼: 글로 답하는 버튼만 꺼내고(앱 동작 버튼은 뺌), 메시지가 없으면 이름을 보냄
+ask_rec = {"timestamp": iso(0), "message": {"content": [
+    {"type": "tool_use", "name": "mcp__ccd_turn__wrap_up",
+     "input": {"recap": "끝", "ask": "어느 쪽으로 할까요?",
+               "actions": [{"label": "A로", "message": "A로 해 줘"}, {"label": "B로"},
+                           {"action": "commit"}]}}]}}
+tp2 = os.path.join(tmp, "ask.jsonl")
+with open(tp2, "w", encoding="utf-8") as f:
+    f.write(json.dumps(ask_rec) + "\n")
+got = taskpet.claude_turn_asks(tp2, time.time() - 5)
+assert got == {"ask": "어느 쪽으로 할까요?",
+               "choices": [{"label": "A로", "message": "A로 해 줘"},
+                           {"label": "B로", "message": "B로"}]}, got
+ask_rec["message"]["content"][0]["input"]["actions"] = json.dumps([{"label": "네"}])   # 글(JSON)로 온 목록
+with open(tp2, "w", encoding="utf-8") as f:
+    f.write(json.dumps(ask_rec) + "\n")
+assert taskpet.claude_turn_asks(tp2, time.time() - 5)["choices"] == [{"label": "네", "message": "네"}]
 ev("end")                                   # 앱이 세션을 닫아도 질문 대기는 남음
 assert tr.tasks["c:s1"]["status"] == "waiting"
 
