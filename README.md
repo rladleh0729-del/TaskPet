@@ -38,6 +38,7 @@ chatgpt.com·gemini.google.com·claude.ai·grok.com·kimi.ai에서 질문을 보
 - **로봇 드래그**: 위치 옮기기 (옮긴 자리를 기억해서 다시 켜도 그 자리에 나타납니다)
 - **말풍선 줄 더블 클릭**: 그 대화를 Claude 앱 / ChatGPT 앱 / 브라우저 탭에서 바로 열기 (마우스를 올린 줄은 배경이 밝아집니다)
 - **✕**: 그 줄 지우기
+- **선택지 질문에 바로 답하기**: Claude 데스크톱 앱의 Claude Code가 선택지 질문으로 멈추면, 그 줄 아래에 질문과 선택지 버튼이 나옵니다. 버튼을 누르거나 **기타**에 직접 써서 보내면, Claude 앱을 앞으로 가져오지 않고 그 세션에 답이 들어갑니다. (다른 세션을 보고 있었다면 잠깐 바꿔서 보낸 뒤 원래 화면으로 돌려놓고, 그 세션 입력창에 쓰던 글이 있으면 보내지 않습니다)
 - **새 버전 알림**: 10분마다 새 버전을 확인해, 있으면 초록 "⬆ 새 버전" 줄이 생깁니다. 더블 클릭하면 받아서 업데이트합니다.
 - **우클릭**: 버전 보기 · 완료 기록 지우기 · 소리 끄기/켜기 · 브라우저 확장 받기 · 제거 · 종료
 - 줄 맨 앞의 작은 아이콘으로 어느 AI인지 구분됩니다 (Claude 주황 빛살, GPT 매듭, Gemini 별, Grok 사선, Kimi K). 각 회사를 떠올리게 직접 그린 모양이며, 공식 로고 파일이 아닙니다.
@@ -72,7 +73,7 @@ python build.py
 
 ## English
 
-TaskPet is a tiny orange pixel robot that sits at the bottom right of your screen and shows what your AI coding agents are doing: **working**, **waiting for your approval** (red, with a sound), or **done** (green, with a short chime). It supports **Claude Code** (desktop app, terminal and VS Code), **regular chats in the Claude desktop app**, **Codex** (ChatGPT desktop app / Codex CLI) and **regular ChatGPT chats** in the desktop app, on Windows 10/11. Claude rows are labeled in orange, Codex and ChatGPT rows in blue. Hover a row to highlight it; a green "new version" row appears when an update is available — double-click it to update.
+TaskPet is a tiny orange pixel robot that sits at the bottom right of your screen and shows what your AI coding agents are doing: **working**, **waiting for your approval** (red, with a sound), or **done** (green, with a short chime). It supports **Claude Code** (desktop app, terminal and VS Code), **regular chats in the Claude desktop app**, **Codex** (ChatGPT desktop app / Codex CLI) and **regular ChatGPT chats** in the desktop app, on Windows 10/11. Claude rows are labeled in orange, Codex and ChatGPT rows in blue. When Claude Code in the Claude desktop app stops with a multiple-choice question, the question and its choices appear under the row — click one (or type under "Other") to answer that session without bringing the app to the front. Hover a row to highlight it; a green "new version" row appears when an update is available — double-click it to update.
 
 - Download `TaskPet.exe` from Releases and run it. It installs itself and starts with Windows.
 - Click the robot to hide/show the bubble, drag it to move (the position is remembered), mute sounds from the right-click menu, small hand-drawn icons (not official logos) show which AI each row is from, double-click a row to jump to that chat, right-click for the menu.
