@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.7"
+VERSION = "1.4.8"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -43,6 +43,7 @@ NATIVE_NAME = "kr.querybot.taskpet"
 # 확장 'TaskPet for ChatGPT'의 ID (manifest.json의 key로 고정됨)
 # 연결을 허용할 브라우저 확장: Chrome 웹 스토어판, 직접 불러온 개발판(manifest "key"로 고정)
 EXT_IDS = ["ojhigjdohhpkdkolpeeobffggkejpakn", "dmbfmfooilahmdclgfkkkdnpickfbilm"]
+STORE_URL = "https://chromewebstore.google.com/detail/" + EXT_IDS[0]
 NATIVE_KEYS = [r"Software\Google\Chrome\NativeMessagingHosts",
                r"Software\Chromium\NativeMessagingHosts",
                r"Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
@@ -78,7 +79,7 @@ T = {
     "clear": ("완료 기록 모두 지우기", "Clear finished"),
     "quit": ("종료", "Quit"),
     "mute": ("소리 끄기", "Mute sounds"),
-    "ext_menu": ("브라우저 확장 받기", "Get browser extension"),
+    "ext_menu": ("브라우저 확장 설치 (웹 스토어)", "Install browser extension (Web Store)"),
     "reply_other": ("기타", "Other"),
     "reply_send": ("보내기", "Send"),
     "reply_sending": ("보내는 중…", "sending…"),
@@ -86,18 +87,6 @@ T = {
     "reply_nohelper": ("감시 프로그램이 꺼져 있어요", "The helper is not running"),
     "reply_notitle": ("이 세션은 이름이 없어서 찾을 수 없어요. Claude 앱에서 답해 주세요.",
                       "This session has no name, so it can't be found. Please answer in the Claude app."),
-    "ext_done": ("확장 폴더를 받았습니다:\n{p}\n\n(폴더 주소는 복사해 두었습니다)\n\n"
-                 "1. 브라우저 주소창에 chrome://extensions 입력\n"
-                 "   (Brave는 brave://extensions, Edge는 edge://extensions)\n"
-                 "2. 오른쪽 위 '개발자 모드' 켜기\n"
-                 "3. '압축해제된 확장 프로그램 로드' → 주소 칸에 Ctrl+V → 폴더 선택\n\n"
-                 "처음 설치라면 브라우저를 완전히 껐다 켜 주세요.",
-                 "Extension folder saved to:\n{p}\n\n(The path is copied to the clipboard)\n\n"
-                 "1. Open chrome://extensions (brave://, edge:// for Brave, Edge)\n"
-                 "2. Turn on 'Developer mode'\n"
-                 "3. 'Load unpacked' → paste with Ctrl+V → select the folder\n\n"
-                 "On first install, fully restart the browser."),
-    "ext_fail": ("확장 폴더를 받지 못했습니다.\n{e}", "Could not get the extension folder.\n{e}"),
     "uninstall": ("TaskPet 제거", "Uninstall TaskPet"),
     "installed": ("TaskPet 설치 완료!\n\n화면 오른쪽 아래 주황 로봇이 Claude Code와 Codex 작업을 알려 줍니다.\n\n· 이미 열려 있던 Claude Code 세션은 새로 시작해야 잡힙니다.\n· 로봇 클릭 = 말풍선 숨기기, 줄 더블 클릭 = 그 대화 열기, 우클릭 = 메뉴",
                   "TaskPet installed!\n\nThe orange robot at the bottom right shows your Claude Code and Codex tasks.\n\n· Claude Code sessions that were already open need to be restarted.\n· Click robot = hide bubble, double-click a row = open that chat, right-click = menu"),
@@ -765,71 +754,6 @@ class Updater:
             e["phase"] = "run"
         except Exception:
             e["phase"] = "fail"
-
-
-def downloads_dir():
-    """Windows '다운로드' 폴더 (사용자가 옮겨 둔 경우까지 따름)."""
-    try:
-        import uuid
-        guid = (ctypes.c_byte * 16).from_buffer_copy(
-            uuid.UUID("374DE290-123F-4565-9164-39C4925E467B").bytes_le)
-        buf = ctypes.c_wchar_p()
-        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None,
-                                                       ctypes.byref(buf)) == 0:
-            path = buf.value
-            ctypes.windll.ole32.CoTaskMemFree(buf)
-            return path
-    except Exception:
-        pass
-    return os.path.join(HOME, "Downloads")
-
-
-def fetch_extension():
-    """브라우저 확장 폴더를 '다운로드\\TaskPet-extension' 에 둔다. 지금 로봇 버전 태그의 GitHub 소스에서
-    extension/ 만 꺼내고, 인터넷이 안 되면 설치 폴더에 들어 있는 확장을 복사한다. 만든 폴더 경로를 돌려준다."""
-    dest = os.path.join(downloads_dir(), "TaskPet-extension")
-    tmp = dest + ".new"
-    shutil.rmtree(tmp, ignore_errors=True)
-    got = False
-    for ref in ("refs/tags/v" + VERSION, "refs/heads/main"):
-        try:
-            url = f"https://codeload.github.com/rladleh0729-del/TaskPet/zip/{ref}"
-            req = urllib.request.Request(url, headers={"User-Agent": "TaskPet/" + VERSION})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                data = r.read()
-            import io
-            import zipfile
-            with zipfile.ZipFile(io.BytesIO(data)) as z:
-                for name in z.namelist():
-                    parts = name.split("/", 2)      # "TaskPet-1.4.2/extension/…"
-                    if len(parts) == 3 and parts[1] == "extension" and parts[2] and not name.endswith("/"):
-                        out = os.path.join(tmp, *parts[2].split("/"))
-                        os.makedirs(os.path.dirname(out), exist_ok=True)
-                        with open(out, "wb") as f:
-                            f.write(z.read(name))
-            if os.path.exists(os.path.join(tmp, "manifest.json")):
-                got = True
-                break
-        except Exception:
-            shutil.rmtree(tmp, ignore_errors=True)
-    if not got:
-        local = next((p for p in (os.path.join(APP_DIR, "chrome-extension"),
-                                  os.path.join(APP_DIR, "..", "extension"))
-                      if os.path.exists(os.path.join(p, "manifest.json"))), None)
-        if not local:
-            raise OSError("GitHub에서도, 설치 폴더에서도 확장을 찾지 못했습니다")
-        shutil.copytree(local, tmp)
-    # 이미 받아 둔 폴더가 있으면 새것으로 바꾼다 (브라우저가 같은 경로를 계속 쓰도록 이름은 그대로)
-    if os.path.isdir(dest):
-        for name in os.listdir(dest):
-            p = os.path.join(dest, name)
-            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
-        for name in os.listdir(tmp):
-            shutil.move(os.path.join(tmp, name), os.path.join(dest, name))
-        shutil.rmtree(tmp, ignore_errors=True)
-    else:
-        os.replace(tmp, dest)
-    return dest
 
 
 def open_task(key, e):
@@ -1676,20 +1600,11 @@ class Pet:
         m.tk_popup(e.x_root, e.y_root)
 
     def get_extension(self):
-        def work():
-            try:
-                path = fetch_extension()
-            except Exception as ex:
-                msgbox(t("ext_fail", e=ex), 0x30)
-                return
-            # 폴더 주소를 복사하고 폴더를 연 뒤 안내 (tk 는 화면 쪽에서만 만지도록 after 로 넘김)
-            self.root.after(0, lambda: (self.root.clipboard_clear(), self.root.clipboard_append(path)))
-            try:
-                os.startfile(path)
-            except OSError:
-                pass
-            msgbox(t("ext_done", p=path))
-        threading.Thread(target=work, daemon=True).start()
+        # Chrome 웹 스토어 페이지를 기본 브라우저로 연다 (Chrome·Brave·Edge 모두 여기서 설치)
+        try:
+            os.startfile(STORE_URL)
+        except OSError:
+            pass
 
     def toggle_mute(self):
         global MUTED

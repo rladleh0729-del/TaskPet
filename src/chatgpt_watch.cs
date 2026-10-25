@@ -9,8 +9,9 @@
 //   표준 입력: open<TAB>제목 / openclaude<TAB>제목   → 그 대화 줄을 눌러 연다 (로봇에서 더블 클릭했을 때만)
 //              replyclaude<TAB>세션 제목<TAB>글(base64) → Claude 앱 그 Code 세션에 글을 넣어 보냄 (로봇에서 선택지를 눌렀을 때만)
 //              cardclaude<TAB>세션 제목<TAB>선택지(base64)<TAB>기타 글(base64) → 그 세션의 질문 카드에서 골라 제출
-//   Claude 창이 가려지거나 최소화돼 있으면 앱이 쉬어서 처리가 안 되므로, 처리하는 동안만 포커스 없이 맨 위에 띄웠다가
-//   끝나면 원래대로(최소화/뒤로) 돌려놓는다. 쓰던 창의 포커스와 마우스는 건드리지 않는다.
+//   Claude 창은 앞으로 가져오지 않는다. 다른 창 뒤에 가려져 있으면 그대로 두고 클릭 신호만 창에 보낸다.
+//   최소화돼 있으면 앱이 완전히 쉬어서, 처리하는 동안만 눈에 안 보이게(투명·클릭 통과) 되살렸다가 다시 최소화한다.
+//   쓰던 창의 포커스와 마우스는 건드리지 않는다. 단계 기록은 이 프로그램 옆 card.log 에 남긴다.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -26,7 +27,6 @@ class ChatGptWatch
     static readonly Queue<string> Commands = new Queue<string>();
 
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
-    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10, SWP_SHOWWINDOW = 0x40;
@@ -34,11 +34,15 @@ class ChatGptWatch
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr h, ref POINT p);
     [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
-    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
+    [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
+    [DllImport("user32.dll")] static extern bool GetLayeredWindowAttributes(IntPtr h, out uint key, out byte alpha, out uint flags);
+    [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
+    const int GWL_EXSTYLE = -20, WS_EX_LAYERED = 0x80000, WS_EX_TRANSPARENT = 0x20;
+    const uint LWA_ALPHA = 0x2;
 
     // 화면 읽기의 '누르기'(Toggle)는 이 카드가 제때 받지 않아서, 그 자리에 클릭 신호만 창에 직접 보낸다.
-    // 실제 마우스 포인터는 움직이지 않고 포커스도 바꾸지 않는다. 그 자리가 Claude 창이 아니면(가려짐) 누르지 않는다.
+    // 실제 마우스 포인터는 움직이지 않고 포커스도 바꾸지 않는다. 신호는 창에 바로 가므로 다른 창에 가려져 있어도 된다.
     static bool ClickOn(AutomationElement e, IntPtr hwnd)
     {
         try
@@ -49,7 +53,6 @@ class ChatGptWatch
             var r = e.Current.BoundingRectangle;
             if (r.IsEmpty || r.Width < 2) return false;
             var pt = new POINT { X = (int)(r.X + Math.Min(40, r.Width / 2)), Y = (int)(r.Y + r.Height / 2) };
-            if (GetAncestor(WindowFromPoint(pt), 2) != hwnd) return false;   // GA_ROOT
             ScreenToClient(hwnd, ref pt);
             var lp = new IntPtr((pt.Y << 16) | (pt.X & 0xFFFF));
             PostMessage(hwnd, 0x0200, IntPtr.Zero, lp);       // WM_MOUSEMOVE
@@ -61,27 +64,37 @@ class ChatGptWatch
         catch { return false; }
     }
 
-    class Shown { public IntPtr Hwnd, Front; public bool Iconic, Skip; }
+    class Shown { public IntPtr Hwnd; public bool Ghost, Layered; public int ExStyle; public uint Key, Flags; public byte Alpha; }
 
-    // 처리하는 동안만 포커스 없이 맨 위에 띄운다 (이미 맨 앞 창이면 그대로)
-    static Shown Surface(IntPtr hwnd)
+    // 가려져 있기만 하면 그대로 둔다 (클릭 신호는 가려진 창도 받는다).
+    // 최소화돼 있으면 앱이 아무것도 처리하지 않으므로, 거의 투명(알파 1)하고 클릭이 통과하는 상태로
+    // 포커스 없이 맨 위에 되살린다 → 눈에는 안 보이고 쓰던 창의 클릭도 그대로 아래 창으로 간다.
+    // 되살린 직후 1~2초 동안 보낸 신호는 버려지므로, 받는 쪽에서 반영될 때까지 다시 보낸다.
+    static Shown Wake(IntPtr hwnd)
     {
-        var s = new Shown { Hwnd = hwnd, Front = GetForegroundWindow(), Iconic = IsIconic(hwnd) };
-        if (s.Front == hwnd) { s.Skip = true; return s; }
-        if (s.Iconic) ShowWindow(hwnd, 4);                                   // SW_SHOWNOACTIVATE
+        var s = new Shown { Hwnd = hwnd };
+        if (!IsIconic(hwnd)) return s;
+        s.Ghost = true;
+        s.ExStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+        s.Layered = (s.ExStyle & WS_EX_LAYERED) != 0
+                    && GetLayeredWindowAttributes(hwnd, out s.Key, out s.Alpha, out s.Flags);
+        SetWindowLong(hwnd, GWL_EXSTYLE, s.ExStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT);
+        SetLayeredWindowAttributes(hwnd, 0, 1, LWA_ALPHA);
+        ShowWindow(hwnd, 4);                                                  // SW_SHOWNOACTIVATE
         SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0,                        // HWND_TOPMOST
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        Thread.Sleep(400);                                                    // 앱이 깨어나 그릴 시간
+        Thread.Sleep(300);
         return s;
     }
 
-    static void Unsurface(Shown s)
+    static void Unwake(Shown s)
     {
-        if (s == null || s.Skip) return;
+        if (s == null || !s.Ghost) return;
         SetWindowPos(s.Hwnd, new IntPtr(-2), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);  // HWND_NOTOPMOST
-        if (s.Iconic) ShowWindow(s.Hwnd, 7);                                  // SW_SHOWMINNOACTIVE (다시 최소화)
-        else if (s.Front != IntPtr.Zero)                                      // 쓰던 창 뒤로
-            SetWindowPos(s.Hwnd, s.Front, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        ShowWindow(s.Hwnd, 7);                                                // SW_SHOWMINNOACTIVE (다시 최소화)
+        if (s.Layered && (s.Flags & LWA_ALPHA) != 0) SetLayeredWindowAttributes(s.Hwnd, s.Key, s.Alpha, s.Flags);
+        else SetLayeredWindowAttributes(s.Hwnd, 0, 255, LWA_ALPHA);           // 완전히 불투명하게
+        SetWindowLong(s.Hwnd, GWL_EXSTYLE, s.ExStyle);
     }
 
     static string Json(string s)
@@ -262,16 +275,25 @@ class ChatGptWatch
         Shown shown = null;
         try
         {
-            shown = Surface(new IntPtr(w.Current.NativeWindowHandle));
-            Log("창 띄움");
+            Log("시작: " + title);
+            shown = Wake(new IntPtr(w.Current.NativeWindowHandle));
+            if (shown.Ghost) Log("최소화돼 있어서 안 보이게 되살림");
             w.FindAll(TreeScope.Descendants, Condition.TrueCondition);   // 처음 읽을 땐 일부만 보여서 한 번 깨운다
             string back = CurrentSession(w);
             if (back == null) return "Claude 앱을 Code 화면으로 두고 다시 보내 주세요";
             if (back != title)
             {
-                if (!Press(SessionRow(w, title))) return "Claude 앱 목록에서 그 세션을 찾지 못했어요";
-                for (int i = 0; i < 40 && CurrentSession(w) != title; i++) Thread.Sleep(100);
-                if (CurrentSession(w) != title) return "그 세션으로 바꾸지 못했어요";
+                var row = SessionRow(w, title);
+                if (row == null) return "Claude 앱 목록에서 그 세션을 찾지 못했어요";
+                // 막 되살린 창은 누른 게 버려질 수 있어 바뀔 때까지 1.5초마다 다시 누른다
+                bool moved = false;
+                for (int k = 0; k < 6 && !moved; k++)
+                {
+                    Press(row);
+                    moved = WaitFor(() => CurrentSession(w) == title, 1500);
+                }
+                if (!moved) return "그 세션으로 바꾸지 못했어요";
+                Log("세션 바꿈");
                 Thread.Sleep(400);
             }
             else back = null;                 // 이미 그 세션이면 돌아갈 필요 없음
@@ -286,11 +308,21 @@ class ChatGptWatch
             }
             return result;
         }
-        finally { Unsurface(shown); Log("창 되돌림"); }
+        finally { Unwake(shown); Log("끝"); }
     }
 
-    static readonly DateTime T0 = DateTime.Now;
-    static void Log(string s) { try { Console.Error.WriteLine(((int)(DateTime.Now - T0).TotalMilliseconds) + "ms " + s); } catch { } }
+    // 답 보내기 단계 기록 (로봇에선 화면 출력이 안 보이므로 파일로). 커지면 새로 시작한다.
+    static readonly string LogPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "card.log");
+    static void Log(string s)
+    {
+        try
+        {
+            var f = new System.IO.FileInfo(LogPath);
+            if (f.Exists && f.Length > 200000) f.Delete();
+            System.IO.File.AppendAllText(LogPath, DateTime.Now.ToString("MM-dd HH:mm:ss.fff ") + s + "\r\n");
+        }
+        catch { }
+    }
 
     static bool WaitFor(Func<bool> ok, int ms)
     {
@@ -312,17 +344,25 @@ class ChatGptWatch
             if (ed == null || !ed.TryGetCurrentPattern(ValuePattern.Pattern, out vpo)) return "입력창을 찾지 못했어요";
             var vp = (ValuePattern)vpo;
             if ((vp.Current.Value ?? "").Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
-            vp.SetValue(text);
             string head = text.Trim();
             head = head.Substring(0, Math.Min(10, head.Length));
-            if (!WaitFor(() => (vp.Current.Value ?? "").Contains(head), 3000)) return "입력창에 글을 넣지 못했어요";
-            var send = ByName(w, "보내기", ControlType.Button) ?? ByName(w, "Send", ControlType.Button);
-            if (send == null || !send.Current.IsEnabled || !Press(send))
+            bool put = false;
+            for (int k = 0; k < 3 && !put; k++)            // 막 되살린 창은 처음 넣은 게 버려질 수 있다
             {
-                try { vp.SetValue(""); } catch { }
-                return "보내기 버튼을 누르지 못했어요";
+                vp.SetValue(text);
+                put = WaitFor(() => (vp.Current.Value ?? "").Contains(head), 2000);
             }
-            return "ok";
+            if (!put) return "입력창에 글을 넣지 못했어요";
+            Log("입력창에 글 넣음");
+            // 보내지면 입력창이 비워진다. 안 비워졌으면 아직 안 간 것이라 다시 누른다
+            for (int k = 0; k < 3; k++)
+            {
+                var send = ByName(w, "보내기", ControlType.Button) ?? ByName(w, "Send", ControlType.Button);
+                if (send == null || !send.Current.IsEnabled || !Press(send)) break;
+                if (WaitFor(() => !(vp.Current.Value ?? "").Contains(head), 2000)) { Log("보냄"); return "ok"; }
+            }
+            try { vp.SetValue(""); } catch { }
+            return "보내기 버튼을 누르지 못했어요";
         });
     }
 
@@ -347,11 +387,15 @@ class ChatGptWatch
             var hwnd = new IntPtr(w.Current.NativeWindowHandle);
             var tp = (TogglePattern)opt.GetCurrentPattern(TogglePattern.Pattern);
             Log("선택지 찾음: " + opt.Current.Name + " / 상태 " + tp.Current.ToggleState);
-            if (tp.Current.ToggleState != ToggleState.On && !ClickOn(opt, hwnd))
-                return "선택지 자리가 가려져 있어 누르지 않았어요";
-            Log("클릭 보냄");
-            if (!WaitFor(() => tp.Current.ToggleState == ToggleState.On, 4000))
-                return "선택이 확인되지 않아 제출하지 않았어요";
+            // 막 되살린 창은 처음 1~2초의 클릭을 버리므로(나중에 처리되지도 않음) 골라질 때까지 0.7초마다 다시 누른다
+            bool on = tp.Current.ToggleState == ToggleState.On;
+            for (int k = 0; k < 14 && !on; k++)
+            {
+                if (!ClickOn(opt, hwnd)) return "선택지 자리를 찾지 못했어요";
+                on = WaitFor(() => tp.Current.ToggleState == ToggleState.On, 700);
+                Log("선택지 클릭 " + (k + 1) + "번째 → " + (on ? "골라짐" : "아직"));
+            }
+            if (!on) return "선택이 확인되지 않아 제출하지 않았어요";
             if (isOther)
             {
                 AutomationElement box = null;
@@ -366,13 +410,17 @@ class ChatGptWatch
                 if (!WaitFor(() => (vp.Current.Value ?? "").Contains(head), 3000))
                     return "기타 입력칸에 글을 넣지 못해 제출하지 않았어요";
             }
-            var submit = ByName(w, "제출", ControlType.Button) ?? ByName(w, "Submit", ControlType.Button);
-            if (submit == null || !submit.Current.IsEnabled || !ClickOn(submit, hwnd)) return "제출 버튼을 누르지 못했어요";
-            Log("제출 클릭 보냄");
-            // 제출되면 카드(선택지 버튼)가 사라진다
-            if (!WaitFor(() => ByName(w, "제출", ControlType.Button) == null, 6000))
-                return "제출이 확인되지 않았어요. Claude 앱에서 확인해 주세요";
-            return "ok";
+            // 제출되면 카드(제출 버튼)가 사라진다. 남아 있으면 아직 안 간 것이라 다시 누른다
+            for (int k = 0; k < 3; k++)
+            {
+                var submit = ByName(w, "제출", ControlType.Button) ?? ByName(w, "Submit", ControlType.Button);
+                if (submit == null) return k == 0 ? "제출 버튼을 찾지 못했어요" : "ok";
+                if (!submit.Current.IsEnabled || !ClickOn(submit, hwnd)) return "제출 버튼을 누르지 못했어요";
+                Log("제출 클릭 " + (k + 1) + "번째");
+                if (WaitFor(() => ByName(w, "제출", ControlType.Button) == null
+                                  && ByName(w, "Submit", ControlType.Button) == null, 2500)) return "ok";
+            }
+            return "제출이 확인되지 않았어요. Claude 앱에서 확인해 주세요";
         });
     }
 
