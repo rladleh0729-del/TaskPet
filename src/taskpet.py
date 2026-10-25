@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.8"
+VERSION = "1.4.9"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -73,6 +73,8 @@ T = {
     "more": ("… 외 {n}개", "… {n} more"),
     "update_title": ("새 버전 {v}", "New version {v}"),
     "update_ready": ("더블 클릭해서 업데이트", "double-click to update"),
+    "ext_tip_title": ("브라우저 AI 채팅도 보려면 확장 설치", "Install the browser extension for web AI chats"),
+    "ext_tip_body": ("더블 클릭하면 웹 스토어가 열려요", "double-click to open the Web Store"),
     "update_dl": ("받는 중 {p}%", "downloading {p}%"),
     "update_run": ("설치 프로그램 실행", "installer started"),
     "update_fail": ("받기 실패 · 더블 클릭해서 다시", "download failed · double-click to retry"),
@@ -137,16 +139,16 @@ SILVER = "#cfd3dc"
 TEAL = "#3dd6c6"
 # Claude 주황, GPT 쪽 파랑, Gemini 보라, Grok 은색, Kimi 청록
 SRC_COLOR = {"claude": ACCENT, "claudeweb": ACCENT, "claudechat": ACCENT, "codex": BLUE, "chatgpt": BLUE,
-             "chatweb": BLUE, "gemini": PURPLE, "grok": SILVER, "kimi": TEAL, "update": GREEN}
+             "chatweb": BLUE, "gemini": PURPLE, "grok": SILVER, "kimi": TEAL, "update": GREEN, "tip": GREEN}
 SRC_LABEL = {"claude": "Claude", "claudeweb": "Claude 웹", "claudechat": "Claude 채팅",
              "codex": "Codex", "chatgpt": "ChatGPT",
              "chatweb": "ChatGPT 웹", "gemini": "Gemini", "grok": "Grok", "kimi": "Kimi",
-             "update": "TaskPet"}
+             "update": "TaskPet", "tip": "TaskPet"}
 UPDATE_API = "https://api.github.com/repos/rladleh0729-del/TaskPet/releases/latest"
 # 줄 앞 아이콘 종류 (공식 로고 파일은 쓰지 않고, 각 회사를 떠올리게 하는 모양을 직접 그린다)
 ICON_KIND = {"claude": "claude", "claudeweb": "claude", "claudechat": "claude",
              "codex": "gpt", "chatgpt": "gpt", "chatweb": "gpt", "gemini": "gemini",
-             "grok": "grok", "kimi": "kimi", "update": "update"}
+             "grok": "grok", "kimi": "kimi", "update": "update", "tip": "tip"}
 
 
 def brand_icon(kind, size):
@@ -193,6 +195,10 @@ def brand_icon(kind, size):
         d.ellipse([0, 0, n - 1, n - 1], fill=GREEN)
         d.polygon([(c, n * 0.17), (n * 0.8, n * 0.52), (n * 0.2, n * 0.52)], fill="#1b1c20")
         d.rectangle([c - n * 0.1, n * 0.5, c + n * 0.1, n * 0.8], fill="#1b1c20")
+    elif kind == "tip":                    # 초록 동그라미에 더하기 (확장 추가)
+        d.ellipse([0, 0, n - 1, n - 1], fill=GREEN)
+        d.rectangle([n * 0.22, c - n * 0.08, n * 0.78, c + n * 0.08], fill="#1b1c20")
+        d.rectangle([c - n * 0.08, n * 0.22, c + n * 0.08, n * 0.78], fill="#1b1c20")
     else:                                  # Claude: 길이를 번갈아 둔 주황 빛살
         for i in range(12):
             a = math.pi * i / 6 + math.pi / 12
@@ -693,6 +699,30 @@ def version_tuple(v):
     return tuple(int(n) for n in re.findall(r"\d+", str(v))[:3])
 
 
+def browser_extension_state():
+    """(지원 브라우저가 있는지, 우리 확장이 어느 브라우저에든 설치돼 있는지).
+    스토어판은 프로필의 Extensions 안 ID 폴더로, 직접 불러온 개발판은 프로필 설정 파일에 적힌 ID로 안다."""
+    local = os.environ.get("LOCALAPPDATA", "")
+    found_browser = False
+    for sub in (r"Google\Chrome", r"BraveSoftware\Brave-Browser", r"Microsoft\Edge", "Chromium"):
+        data = os.path.join(local, sub, "User Data")
+        if not os.path.isdir(data):
+            continue
+        found_browser = True
+        for prof in [os.path.join(data, "Default")] + glob.glob(os.path.join(data, "Profile *")):
+            if any(os.path.isdir(os.path.join(prof, "Extensions", i)) for i in EXT_IDS):
+                return True, True
+            for name in ("Secure Preferences", "Preferences"):
+                try:
+                    with open(os.path.join(prof, name), "rb") as f:
+                        text = f.read()
+                except OSError:
+                    continue
+                if any(i.encode() in text for i in EXT_IDS):
+                    return True, True
+    return found_browser, False
+
+
 class Updater:
     """켤 때와 10분마다 GitHub 최신 릴리스를 확인한다. '새 버전' 줄을 더블 클릭하면 받아서 설치 프로그램을 실행
     (설치 프로그램이 지금 로봇을 끄고 덮어쓴 뒤 새 로봇을 띄운다)."""
@@ -759,6 +789,12 @@ class Updater:
 def open_task(key, e):
     if e.get("src") == "update":
         Updater.install(e)
+        return
+    if e.get("src") == "tip":
+        try:
+            os.startfile(STORE_URL)
+        except OSError:
+            pass
         return
     if e.get("src") in WEB_SRCS:
         # 브라우저가 켜져 있으면 연결 프로그램을 거쳐 그 탭을 앞으로, 아니면 그 대화를 새로 연다
@@ -945,7 +981,7 @@ class Tracker:
     def __init__(self, on_event):
         saved = read_json(STATE, {})
         # '새 버전' 줄은 저장해 두지 않고 켤 때마다 다시 확인한다 (받는 도중 꺼졌던 상태가 남지 않게)
-        self.tasks = {k: v for k, v in saved.get("tasks", {}).items() if not k.startswith("u:")}
+        self.tasks = {k: v for k, v in saved.get("tasks", {}).items() if not k.startswith(("u:", "t:"))}
         self.ev_off = saved.get("events_offset", 0)
         self.pkg_off = saved.get("pkg_offsets", {})   # 앱 가상 공간 신호 파일 → 읽은 위치
         # 사용자가 지운 Codex 줄: 키 → 지운 시각. Codex 기록은 다시 읽으므로 이보다 옛 일은 무시
@@ -1291,6 +1327,17 @@ class Tracker:
                                "start": time.time(), "status": "update", "url": url, "size": size}
             self.dirty = True
 
+    def apply_ext_tip(self, show):
+        """브라우저는 있는데 확장이 없으면 '확장 설치' 줄을 하나 둔다 (✕로 지우면 다시 안 뜸)."""
+        key = "t:ext"
+        if show and key not in self.tasks:
+            self.tasks[key] = {"src": "tip", "id": "ext", "prompt": "", "folder": APP,
+                               "title": t("ext_tip_title"), "start": time.time(), "status": "tip"}
+            self.dirty = True
+        elif not show and key in self.tasks:
+            del self.tasks[key]
+            self.dirty = True
+
     def drop_deleted(self):
         """앱에서 대화를 지우면 기록 파일도 지워지므로, 파일이 사라진 줄은 목록에서 뺀다."""
         for key in list(self.tasks):
@@ -1533,6 +1580,8 @@ class Pet:
 
         self.tracker = Tracker(self.on_event)
         self.updater = Updater()
+        self.ext_tip = None               # 확장 설치 권유 줄을 둘지 (검사 결과, 다른 스레드가 채움)
+        self.next_ext_check = time.time() + 30
         global GPT
         GPT = ChatGptWatcher()
 
@@ -1606,6 +1655,20 @@ class Pet:
         except OSError:
             pass
 
+    def check_ext_tip(self):
+        # 켠 지 30초 뒤, 그다음 10분마다 확장이 설치됐는지 본다 (✕로 끈 뒤에는 안 봄)
+        if self.ext_tip is not None:
+            self.tracker.apply_ext_tip(self.ext_tip and not self.settings.get("ext_tip_off"))
+            self.ext_tip = None
+        if time.time() < self.next_ext_check or self.settings.get("ext_tip_off"):
+            return
+        self.next_ext_check = time.time() + 10 * 60
+
+        def work():
+            has_browser, installed = browser_extension_state()
+            self.ext_tip = has_browser and not installed
+        threading.Thread(target=work, daemon=True).start()
+
     def toggle_mute(self):
         global MUTED
         MUTED = not MUTED
@@ -1632,6 +1695,8 @@ class Pet:
         self.update_bubble(force=True)
 
     def dismiss(self, key):
+        if key == "t:ext":
+            self.save_setting("ext_tip_off", True)
         self.tracker.tasks.pop(key, None)
         self.tracker.dismissed[key] = time.time()
         self.tracker.dirty = True
@@ -1666,6 +1731,7 @@ class Pet:
             found = self.updater.take()
             if found:
                 self.tracker.apply_update(*found)
+            self.check_ext_tip()
             if self.tick_n % 10 == 1:
                 self.tracker.refresh_claude_titles()
             self.update_bubble()
@@ -1731,6 +1797,8 @@ class Pet:
             body = (t("update_dl", p=e.get("pct", 0)) if phase == "dl" else
                     t("update_run") if phase == "run" else
                     t("update_fail") if phase == "fail" else t("update_ready"))
+        elif e.get("status") == "tip":
+            body = t("ext_tip_body")
         elif e.get("status") == "done":
             when = time.strftime("%H:%M", time.localtime(e.get("end", now)))
             body = t("done", w=when, d=fmt_dur(e.get("end", now) - e.get("start", now)))

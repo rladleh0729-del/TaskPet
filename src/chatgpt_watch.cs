@@ -33,7 +33,10 @@ class ChatGptWatch
     struct POINT { public int X, Y; }
     [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr h, ref POINT p);
-    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
     [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int i, int v);
     [DllImport("user32.dll")] static extern bool GetLayeredWindowAttributes(IntPtr h, out uint key, out byte alpha, out uint flags);
@@ -41,8 +44,8 @@ class ChatGptWatch
     const int GWL_EXSTYLE = -20, WS_EX_LAYERED = 0x80000, WS_EX_TRANSPARENT = 0x20;
     const uint LWA_ALPHA = 0x2;
 
-    // 화면 읽기의 '누르기'(Toggle)는 이 카드가 제때 받지 않아서, 그 자리에 클릭 신호만 창에 직접 보낸다.
-    // 실제 마우스 포인터는 움직이지 않고 포커스도 바꾸지 않는다. 신호는 창에 바로 가므로 다른 창에 가려져 있어도 된다.
+    // 화면 읽기의 '누르기'(Invoke·Toggle)와 글 넣기(SetValue)는 Claude 앱이 창을 맨 앞으로 끌어와 포커스까지 가져가므로,
+    // 그 자리에 클릭 신호만 창에 직접 보낸다. 실제 마우스 포인터는 움직이지 않고 포커스도 바꾸지 않는다.
     static bool ClickOn(AutomationElement e, IntPtr hwnd)
     {
         try
@@ -64,23 +67,43 @@ class ChatGptWatch
         catch { return false; }
     }
 
-    class Shown { public IntPtr Hwnd; public bool Ghost, Layered; public int ExStyle; public uint Key, Flags; public byte Alpha; }
+    // 글을 키 입력 신호(WM_CHAR)로 한 글자씩 보낸다. 줄바꿈은 '보내기'가 돼 버리므로 띄어쓰기로 바꾼다.
+    static void TypeText(IntPtr hwnd, string text)
+    {
+        foreach (char c in text)
+            PostMessage(hwnd, 0x0102, new IntPtr(c == '\r' || c == '\n' ? ' ' : c), new IntPtr(1));
+    }
 
-    // 가려져 있기만 하면 그대로 둔다 (클릭 신호는 가려진 창도 받는다).
-    // 최소화돼 있으면 앱이 아무것도 처리하지 않으므로, 거의 투명(알파 1)하고 클릭이 통과하는 상태로
-    // 포커스 없이 맨 위에 되살린다 → 눈에는 안 보이고 쓰던 창의 클릭도 그대로 아래 창으로 간다.
+    // 잘못 들어간 글을 지운다 (Backspace 신호)
+    static void Erase(IntPtr hwnd, int n)
+    {
+        for (int i = 0; i < n; i++)
+        {
+            PostMessage(hwnd, 0x0100, new IntPtr(0x08), new IntPtr(0x000E0001));            // WM_KEYDOWN VK_BACK
+            PostMessage(hwnd, 0x0101, new IntPtr(0x08), new IntPtr(unchecked((int)0xC00E0001)));
+        }
+    }
+
+    class Shown { public IntPtr Hwnd, Above; public bool Ghost, Iconic, Layered; public int ExStyle; public uint Key, Flags; public byte Alpha; }
+
+    // Claude 창이 맨 앞(사용자가 보고 있음)이면 그대로 둔다.
+    // 아니면 가려졌거나 최소화돼 앱이 쉬고 있으므로, 거의 투명(알파 1)하고 클릭이 통과하는 상태로
+    // 포커스 없이 맨 위에 올린다 → 눈에는 안 보이고 쓰던 창의 클릭도 그대로 아래 창으로 간다.
     // 되살린 직후 1~2초 동안 보낸 신호는 버려지므로, 받는 쪽에서 반영될 때까지 다시 보낸다.
     static Shown Wake(IntPtr hwnd)
     {
-        var s = new Shown { Hwnd = hwnd };
-        if (!IsIconic(hwnd)) return s;
+        var s = new Shown { Hwnd = hwnd, Iconic = IsIconic(hwnd) };
+        if (!s.Iconic && GetForegroundWindow() == hwnd) return s;
         s.Ghost = true;
+        // 원래 바로 위에 있던 보통 창(맨 위 고정 창 제외)을 기억해 두었다가 그 아래로 돌려놓는다
+        for (IntPtr x = GetWindow(hwnd, 3); x != IntPtr.Zero; x = GetWindow(x, 3))      // GW_HWNDPREV
+            if (IsWindowVisible(x) && (GetWindowLong(x, GWL_EXSTYLE) & 0x8) == 0) { s.Above = x; break; }   // WS_EX_TOPMOST 아님
         s.ExStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
         s.Layered = (s.ExStyle & WS_EX_LAYERED) != 0
                     && GetLayeredWindowAttributes(hwnd, out s.Key, out s.Alpha, out s.Flags);
         SetWindowLong(hwnd, GWL_EXSTYLE, s.ExStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT);
         SetLayeredWindowAttributes(hwnd, 0, 1, LWA_ALPHA);
-        ShowWindow(hwnd, 4);                                                  // SW_SHOWNOACTIVATE
+        if (s.Iconic) ShowWindow(hwnd, 4);                                    // SW_SHOWNOACTIVATE
         SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0,                        // HWND_TOPMOST
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         Thread.Sleep(300);
@@ -91,7 +114,9 @@ class ChatGptWatch
     {
         if (s == null || !s.Ghost) return;
         SetWindowPos(s.Hwnd, new IntPtr(-2), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);  // HWND_NOTOPMOST
-        ShowWindow(s.Hwnd, 7);                                                // SW_SHOWMINNOACTIVE (다시 최소화)
+        if (s.Iconic) ShowWindow(s.Hwnd, 7);                                  // SW_SHOWMINNOACTIVE (다시 최소화)
+        else if (s.Above != IntPtr.Zero)                                      // 원래 자리(그 창 바로 아래)로
+            SetWindowPos(s.Hwnd, s.Above, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (s.Layered && (s.Flags & LWA_ALPHA) != 0) SetLayeredWindowAttributes(s.Hwnd, s.Key, s.Alpha, s.Flags);
         else SetLayeredWindowAttributes(s.Hwnd, 0, 255, LWA_ALPHA);           // 완전히 불투명하게
         SetWindowLong(s.Hwnd, GWL_EXSTYLE, s.ExStyle);
@@ -256,17 +281,9 @@ class ChatGptWatch
         return null;
     }
 
-    static bool Press(AutomationElement e)
-    {
-        object p;
-        if (e == null || !e.TryGetCurrentPattern(InvokePattern.Pattern, out p)) return false;
-        ((InvokePattern)p).Invoke();
-        return true;
-    }
-
     // 그 세션으로 화면을 바꾸고(필요하면) 입력창에 글을 넣어 '보내기'를 누른 뒤, 원래 보던 세션으로 돌려놓는다.
     // 돌려주는 값: "ok" 또는 사용자에게 보여 줄 이유
-    // 창을 잠깐 띄우고 → 그 세션으로 바꾸고 → work → 원래 세션으로 돌려놓고 → 창도 원래대로
+    // 창을 안 보이게 깨우고 → 그 세션으로 바꾸고 → work → 원래 세션으로 돌려놓고 → 창도 원래대로
     static string InSession(string title, Func<AutomationElement, string> work)
     {
         var wins = AppWindows("claude");
@@ -276,8 +293,9 @@ class ChatGptWatch
         try
         {
             Log("시작: " + title);
-            shown = Wake(new IntPtr(w.Current.NativeWindowHandle));
-            if (shown.Ghost) Log("최소화돼 있어서 안 보이게 되살림");
+            var hwnd = new IntPtr(w.Current.NativeWindowHandle);
+            shown = Wake(hwnd);
+            if (shown.Ghost) Log(shown.Iconic ? "최소화돼 있어서 안 보이게 되살림" : "뒤에 있어서 안 보이게 깨움");
             w.FindAll(TreeScope.Descendants, Condition.TrueCondition);   // 처음 읽을 땐 일부만 보여서 한 번 깨운다
             string back = CurrentSession(w);
             if (back == null) return "Claude 앱을 Code 화면으로 두고 다시 보내 주세요";
@@ -289,7 +307,7 @@ class ChatGptWatch
                 bool moved = false;
                 for (int k = 0; k < 6 && !moved; k++)
                 {
-                    Press(row);
+                    ClickOn(row, hwnd);
                     moved = WaitFor(() => CurrentSession(w) == title, 1500);
                 }
                 if (!moved) return "그 세션으로 바꾸지 못했어요";
@@ -303,7 +321,8 @@ class ChatGptWatch
             if (back != null)
             {
                 Thread.Sleep(500);
-                Press(SessionRow(w, back));      // 원래 보던 세션으로 화면을 돌려놓음
+                var row = SessionRow(w, back);   // 원래 보던 세션으로 화면을 돌려놓음
+                if (row != null) ClickOn(row, hwnd);
                 Thread.Sleep(300);
             }
             return result;
@@ -344,24 +363,32 @@ class ChatGptWatch
             if (ed == null || !ed.TryGetCurrentPattern(ValuePattern.Pattern, out vpo)) return "입력창을 찾지 못했어요";
             var vp = (ValuePattern)vpo;
             if ((vp.Current.Value ?? "").Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
+            var hwnd = new IntPtr(w.Current.NativeWindowHandle);
             string head = text.Trim();
             head = head.Substring(0, Math.Min(10, head.Length));
-            bool put = false;
-            for (int k = 0; k < 3 && !put; k++)            // 막 되살린 창은 처음 넣은 게 버려질 수 있다
+            // 입력창을 클릭 신호로 고르고 글자를 신호로 넣는다 (화면 읽기로 넣으면 앱이 창을 앞으로 가져옴)
+            if (!ClickOn(ed, hwnd)) return "입력창 자리를 찾지 못했어요";
+            Thread.Sleep(200);
+            TypeText(hwnd, text);
+            string got = "";
+            bool put = WaitFor(() => (got = (vp.Current.Value ?? "")).Contains(head), 3000);
+            if (!put || got.Trim().Length > text.Trim().Length + 2)
             {
-                vp.SetValue(text);
-                put = WaitFor(() => (vp.Current.Value ?? "").Contains(head), 2000);
+                Erase(hwnd, got.Length + 2);           // 반쯤 들어갔거나 엉뚱하게 들어간 글은 지운다
+                return "입력창에 글을 넣지 못했어요";
             }
-            if (!put) return "입력창에 글을 넣지 못했어요";
             Log("입력창에 글 넣음");
             // 보내지면 입력창이 비워진다. 안 비워졌으면 아직 안 간 것이라 다시 누른다
             for (int k = 0; k < 3; k++)
             {
-                var send = ByName(w, "보내기", ControlType.Button) ?? ByName(w, "Send", ControlType.Button);
-                if (send == null || !send.Current.IsEnabled || !Press(send)) break;
+                // 글자가 들어간 뒤 '보내기'가 켜지기까지 조금 걸린다
+                AutomationElement send = null;
+                WaitFor(() => (send = ByName(w, "보내기", ControlType.Button) ?? ByName(w, "Send", ControlType.Button)) != null
+                              && send.Current.IsEnabled, 3000);
+                if (send == null || !send.Current.IsEnabled || !ClickOn(send, hwnd)) break;
                 if (WaitFor(() => !(vp.Current.Value ?? "").Contains(head), 2000)) { Log("보냄"); return "ok"; }
             }
-            try { vp.SetValue(""); } catch { }
+            Erase(hwnd, (vp.Current.Value ?? "").Length + 2);
             return "보내기 버튼을 누르지 못했어요";
         });
     }
@@ -404,9 +431,12 @@ class ChatGptWatch
                 if (box == null || !box.TryGetCurrentPattern(ValuePattern.Pattern, out vpo))
                     return "기타 입력칸을 찾지 못해 제출하지 않았어요";
                 var vp = (ValuePattern)vpo;
-                vp.SetValue(other);
                 string head = other.Trim();
                 head = head.Substring(0, Math.Min(10, head.Length));
+                if (!ClickOn(box, hwnd)) return "기타 입력칸 자리를 찾지 못했어요";
+                Thread.Sleep(200);
+                Erase(hwnd, (vp.Current.Value ?? "").Length);   // 전에 써 둔 글이 있으면 비운다
+                TypeText(hwnd, other);
                 if (!WaitFor(() => (vp.Current.Value ?? "").Contains(head), 3000))
                     return "기타 입력칸에 글을 넣지 못해 제출하지 않았어요";
             }
