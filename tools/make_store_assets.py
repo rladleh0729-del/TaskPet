@@ -26,6 +26,18 @@ with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
                 z.write(p, rel)
 print("zip", zpath, sorted(zipfile.ZipFile(zpath).namelist()))
 
+# ---- 사이트(querybot.kr/taskpet/)에서 받는 확장 zip ----
+# 사용자가 '압축해제된 확장'으로 직접 불러오는 용도라 "key" 를 그대로 둔다
+# (키가 있어야 확장 ID가 고정돼 TaskPet 연결 허용 목록과 맞음). 풀면 TaskPet-extension 폴더 하나가 나온다.
+spath = os.path.join(ROOT, "site", "taskpet", "TaskPet-extension.zip")
+os.makedirs(os.path.dirname(spath), exist_ok=True)
+with zipfile.ZipFile(spath, "w", zipfile.ZIP_DEFLATED) as z:
+    for base, _, files in os.walk(EXT):
+        for f in files:
+            p = os.path.join(base, f)
+            z.write(p, "TaskPet-extension/" + os.path.relpath(p, EXT).replace("\\", "/"))
+print("사이트 zip", spath, sorted(zipfile.ZipFile(spath).namelist()))
+
 # ---- 그림 ----
 src = open(os.path.join(ROOT, "src", "taskpet.py"), encoding="utf-8").read()
 ns = {}
