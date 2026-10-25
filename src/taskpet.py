@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.9"
+VERSION = "1.5.0"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -83,6 +83,8 @@ T = {
     "mute": ("소리 끄기", "Mute sounds"),
     "ext_menu": ("브라우저 확장 설치 (웹 스토어)", "Install browser extension (Web Store)"),
     "reply_other": ("기타", "Other"),
+    "reply_write": ("답장", "Reply"),
+    "answer_less": ("▴ 접기", "▴ less"),
     "reply_send": ("보내기", "Send"),
     "reply_sending": ("보내는 중…", "sending…"),
     "reply_fail": ("답을 보내지 못했습니다.\n{e}", "Could not send the answer.\n{e}"),
@@ -137,6 +139,15 @@ BLUE = "#4ea1ff"
 PURPLE = "#a98bff"
 SILVER = "#cfd3dc"
 TEAL = "#3dd6c6"
+# 말풍선 안 답변·버튼: 바탕(어두운 보라)보다 한 단계 밝은 보라 면에 글자를 밝게, 강조는 로봇 주황
+ANS_BG = "#352c40"        # 답변 상자
+ANS_FG = "#efe9f5"
+CHIP_BG = "#4a3a52"       # 선택지 버튼: 보라 바탕 + 부드러운 주황 글자
+CHIP_FG = "#ffc285"
+CHIP_SUB_BG = "#3a3045"   # 기타·답장: 차분한 보라 + 연보라 글자
+CHIP_SUB_FG = "#d9d0e4"
+ENTRY_BG = "#3a3046"      # 입력칸: 보라 바탕 + 밝은 글자, 테두리는 주황
+ENTRY_FG = "#f3eef8"
 # Claude 주황, GPT 쪽 파랑, Gemini 보라, Grok 은색, Kimi 청록
 SRC_COLOR = {"claude": ACCENT, "claudeweb": ACCENT, "claudechat": ACCENT, "codex": BLUE, "chatgpt": BLUE,
              "chatweb": BLUE, "gemini": PURPLE, "grok": SILVER, "kimi": TEAL, "update": GREEN, "tip": GREEN}
@@ -640,7 +651,7 @@ class ChatGptWatcher:
                 self.report = obj
                 self.fresh = True
 
-    def reply(self, title, text):
+    def reply(self, title, text, vscode=False):
         """Claude 앱의 그 Code 세션에 글을 넣어 보낸다 (창은 앞으로 가져오지 않음). 결과는 take_reply()."""
         self.reply_result = None
         if not (self.proc and self.proc.poll() is None):
@@ -648,12 +659,13 @@ class ChatGptWatcher:
             return
         b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
         try:
-            self.proc.stdin.write(f"replyclaude\t{title}\t{b64}\n".encode("utf-8"))
+            cmd = "replyvscode" if vscode else "replyclaude"
+            self.proc.stdin.write(f"{cmd}\t{title}\t{b64}\n".encode("utf-8"))
             self.proc.stdin.flush()
         except OSError:
             self.reply_result = t("reply_nohelper")
 
-    def card(self, title, label, other=""):
+    def card(self, title, label, other="", vscode=False):
         """질문 카드(AskUserQuestion)에서 선택지(또는 '기타' + 글)를 골라 제출한다. 결과는 take_reply()."""
         self.reply_result = None
         if not (self.proc and self.proc.poll() is None):
@@ -661,7 +673,8 @@ class ChatGptWatcher:
             return
         enc = lambda s: base64.b64encode(s.encode("utf-8")).decode("ascii")
         try:
-            self.proc.stdin.write(f"cardclaude\t{title}\t{enc(label)}\t{enc(other)}\n".encode("utf-8"))
+            cmd = "cardvscode" if vscode else "cardclaude"
+            self.proc.stdin.write(f"{cmd}\t{title}\t{enc(label)}\t{enc(other)}\n".encode("utf-8"))
             self.proc.stdin.flush()
         except OSError:
             self.reply_result = t("reply_nohelper")
@@ -923,6 +936,49 @@ def claude_turn_asks(transcript, since):
                 return {"ask": str(inp["ask"]).strip()[:120], "choices": choices}
         return None
     return None
+
+
+def claude_last_answer(transcript):
+    """이번 턴의 마지막 답변 글 (마지막 도구 사용 뒤에 Claude가 쓴 글), 세션을 연 곳, 자동으로 붙은 세션 제목.
+    돌려주는 값: (답변 글, "claude-desktop" | "claude-vscode" | "cli" | "", 제목)
+    VS Code 패널은 이 자동 제목을 세션 이름으로 보여 준다."""
+    try:
+        size = os.path.getsize(transcript)
+        with open(transcript, "rb") as f:
+            f.seek(max(0, size - 600_000))
+            tail = f.read()
+    except OSError:
+        return "", "", ""
+    texts, entry, ai_title = [], "", ""
+    for line in tail.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        entry = rec.get("entrypoint") or entry
+        if rec.get("type") == "ai-title":
+            ai_title = str(rec.get("aiTitle") or "") or ai_title
+        msg = rec.get("message")
+        if rec.get("type") not in ("user", "assistant") or not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        for part in content if isinstance(content, list) else []:
+            if not isinstance(part, dict):
+                continue
+            kind = part.get("type")
+            if kind in ("tool_use", "tool_result") or (rec["type"] == "user" and kind == "text"
+                                                        and not rec.get("isMeta")):
+                texts = []                       # 도구를 쓰거나 새 질문이 오면 그 앞 글은 중간 설명
+            elif rec["type"] == "assistant" and kind == "text":
+                texts.append(str(part.get("text") or ""))
+    answer = "\n\n".join(x.strip() for x in texts if x.strip())
+    answer = re.sub(r"\*\*|`", "", answer)            # 굵게·코드 표시는 빼고 글만
+    answer = re.sub(r"(?m)^#+\s*", "", answer)
+    return answer.strip()[:4000], entry, ai_title.strip()[:60]
 
 
 def claude_pending_card(transcript):
@@ -1264,6 +1320,7 @@ class Tracker:
                 if card:
                     e["ask"], e["choices"], e["card"] = card["ask"], card["choices"], True
                 if live:
+                    self.note_answer(e, d.get("transcript_path") or e.get("transcript", ""))
                     self.on_event("wait", key)
         elif ev == "resume":
             if e is None or e.get("status") == "done":
@@ -1291,6 +1348,8 @@ class Tracker:
                 tp = d.get("transcript_path") or e.get("transcript", "")
                 bg = claude_bg_pending(tp) if live else 0
                 asks = claude_turn_asks(tp, e.get("start", ts)) if live else None
+                if live:            # 줄 아래에 보여 줄 마지막 답변, 로봇에서 답장할 수 있는 세션인지
+                    self.note_answer(e, tp)
                 if asks:
                     e["status"] = "waiting"   # 답을 기다리며 멈춤
                     e["wait_start"] = ts
@@ -1313,6 +1372,14 @@ class Tracker:
                 e["end"] = ts
                 e.pop("bg", None)
         self.dirty = True
+
+    @staticmethod
+    def note_answer(e, transcript):
+        e["answer"], e["entry"], ai_title = claude_last_answer(transcript)
+        # VS Code 세션은 따로 붙인 이름이 없으면 자동 제목이 패널의 세션 이름이다 (로봇에서 답할 때 이걸로 찾음)
+        if e["entry"] == "claude-vscode" and ai_title and not claude_title(
+                {"transcript_path": transcript, "session_id": e.get("id", "")}):
+            e["title"] = ai_title
 
     def apply_update(self, tag, url, size):
         """GitHub 최신 릴리스가 지금보다 새것이면 '새 버전' 줄을 하나 둔다 (✕로 지우면 하루 동안 안 뜸)."""
@@ -1356,6 +1423,11 @@ class Tracker:
     def refresh_claude_titles(self):
         self.drop_deleted()
         for key, e in self.tasks.items():
+            # 답변을 아직 안 꺼내 둔 끝난 줄(로봇을 다시 켰을 때 등)은 한 번 꺼내 둔다
+            if (e.get("src") == "claude" and e.get("status") in ("done", "waiting")
+                    and "answer" not in e and e.get("transcript")):
+                self.note_answer(e, e["transcript"])
+                self.dirty = True
             # '백그라운드 기다리는 중'이 실제로는 끝나 있고 질문으로 멈춘 상태면 바로잡는다
             if e.get("src") == "claude" and e.get("bg") and e.get("transcript"):
                 bg = claude_bg_pending(e["transcript"])
@@ -1559,6 +1631,7 @@ class Pet:
         self._infos = []
         self._icons = {}
         self.reply_open = None        # '기타'로 입력칸을 연 줄
+        self.answer_open = None       # 답변을 펼쳐 둔 줄
         self.reply_key = None         # 답을 보내는 중인 줄
         self.reply_var = tk.StringVar(self.root)
         # 사용자 설정: 로봇 위치, 소리 끄기
@@ -1827,7 +1900,8 @@ class Pet:
             (k, e.get("status"), e.get("title", ""),
              "" if compact else e.get("prompt", ""),
              e.get("ask", ""), tuple(c["label"] for c in e.get("choices") or []),
-             bool(e.get("sending")), self.reply_open == k) for k, e in shown))
+             bool(e.get("sending")), self.reply_open == k,
+             e.get("answer", "")[:40], self.answer_open == k) for k, e in shown))
         if not force and sig == self._bub_sig:
             for k, lbl in self._infos:     # 시간 글자만 바꿔 깜빡임 방지
                 e = self.tracker.tasks.get(k)
@@ -1855,6 +1929,8 @@ class Pet:
                             compound="left", bg=INNER, fg=color, font=(FONT, 9, "bold"))
             head.pack(side="left")
             label = SRC_LABEL.get(e.get("src"), "Claude")
+            if e.get("entry") == "claude-vscode":
+                label += " · VS Code"
             if e.get("browser"):                 # 웹 줄은 어느 브라우저인지도
                 label += " · " + BROWSER_NAME.get(e["browser"], e["browser"].capitalize())
             srcl = tk.Label(top, text="  " + label,
@@ -1880,8 +1956,13 @@ class Pet:
             for w in widgets:
                 w.bind("<Button-1>", lambda ev, k=key: self.row_click(k))
                 w.configure(cursor="hand2")
+            if status in ("done", "waiting") and e.get("src") == "claude" and e.get("answer"):
+                self.add_answer(row, key, e, compact)
             if status == "waiting" and e.get("src") == "claude" and e.get("ask"):
                 self.add_choices(row, key, e)
+            elif (status == "done" and e.get("entry") in ("claude-desktop", "claude-vscode")
+                  and e.get("title")):
+                self.add_reply(row, key, e)
             # 마우스를 올린 줄은 배경을 살짝 밝게 (더블 클릭할 줄이 어느 것인지 보이게)
             parts = widgets + [x]
             for w in parts:
@@ -1895,13 +1976,14 @@ class Pet:
     # ---- 선택지 질문에 답하기 ----
     def chip(self, parent, text, command, sub=False):
         """작은 버튼 (말풍선이 투명 창이라 Label로 만들고 누르면 command)."""
-        base = "#2a2331" if sub else "#3a3042"
-        b = tk.Label(parent, text=text, bg=base, fg=SUB if sub else FG, font=(FONT, 8, "bold"),
+        # 선택지는 주황 글자로 눈에 띄게, 기타·답장은 차분하게 (올리면 주황 바탕)
+        base, fg = (CHIP_SUB_BG, CHIP_SUB_FG) if sub else (CHIP_BG, CHIP_FG)
+        b = tk.Label(parent, text=text, bg=base, fg=fg, font=(FONT, 8, "bold"),
                      padx=S(7), pady=S(2), cursor="hand2")
         b.pack(side="left", padx=(0, S(4)))
         b.bind("<Button-1>", lambda ev: command())
         b.bind("<Enter>", lambda ev: b.configure(bg=ACCENT, fg="#1b1c20"))
-        b.bind("<Leave>", lambda ev: b.configure(bg=base, fg=SUB if sub else FG))
+        b.bind("<Leave>", lambda ev: b.configure(bg=base, fg=fg))
         return b
 
     def add_choices(self, row, key, e):
@@ -1921,15 +2003,65 @@ class Pet:
             self.chip(btns, c["label"], lambda m=c["message"]: self.send_reply(key, m))
         self.chip(btns, t("reply_other"), lambda: self.open_other(key), sub=True)
         if self.reply_open == key:
-            f = tk.Frame(box, bg=INNER)
-            f.pack(fill="x", pady=(S(3), 0))
-            ent = tk.Entry(f, textvariable=self.reply_var, bg="#2e2636", fg=FG,
-                           insertbackground=FG, relief="flat", font=(FONT, 9), width=26)
-            ent.pack(side="left", fill="x", expand=True, ipady=S(2), padx=(0, S(4)))
-            ent.bind("<Return>", lambda ev: self.send_reply(key, self.reply_var.get(), other=True))
-            ent.bind("<Escape>", lambda ev: self.open_other(None))
-            self.chip(f, t("reply_send"), lambda: self.send_reply(key, self.reply_var.get(), other=True))
-            self.root.after(60, lambda: self.focus_entry(ent))
+            self.reply_entry(box, key)
+
+    def reply_entry(self, box, key):
+        f = tk.Frame(box, bg=INNER)
+        f.pack(fill="x", pady=(S(3), 0))
+        ent = tk.Entry(f, textvariable=self.reply_var, bg=ENTRY_BG, fg=ENTRY_FG,
+                       insertbackground=ENTRY_FG, relief="flat", font=(FONT, 9), width=26,
+                       highlightthickness=1, highlightbackground=ACCENT, highlightcolor=ACCENT)
+        ent.pack(side="left", fill="x", expand=True, ipady=S(2), padx=(0, S(4)))
+        ent.bind("<Return>", lambda ev: self.send_reply(key, self.reply_var.get(), other=True))
+        ent.bind("<Escape>", lambda ev: self.open_other(None))
+        self.chip(f, t("reply_send"), lambda: self.send_reply(key, self.reply_var.get(), other=True))
+        self.root.after(60, lambda: self.focus_entry(ent))
+
+    # ---- 끝난 답변 보기·답장 ----
+    def add_answer(self, row, key, e, compact):
+        """마지막 답변 앞부분을 줄 아래에 보여 주고, 누르면 전체를 펼친다 (다시 누르면 접기)."""
+        text = e["answer"]
+        if self.answer_open == key:
+            box = tk.Frame(row, bg=INNER)
+            box.pack(fill="x", pady=(S(2), 0))
+            lines = sum(1 + len(ln) // 34 for ln in text.splitlines()) or 1
+            tw = tk.Text(box, bg=ANS_BG, fg=ANS_FG, font=(FONT, 8), wrap="word", relief="flat",
+                         width=40, height=min(lines, 14), padx=S(4), pady=S(3),
+                         highlightthickness=0, cursor="arrow")
+            tw.insert("1.0", text)
+            tw.configure(state="disabled")      # 읽기만 (글자를 끌어서 복사는 됨)
+            tw.pack(fill="x")
+            less = tk.Label(box, text=t("answer_less"), bg=INNER, fg=SUB, font=(FONT, 8),
+                            cursor="hand2", anchor="w")
+            less.pack(fill="x")
+            less.bind("<Button-1>", lambda ev: self.toggle_answer(key))
+            return
+        flat = " ".join(text.split())
+        n = 56 if compact else 120
+        prev = tk.Label(row, text=flat[:n] + (" … ▾" if len(flat) > n else ""), bg=ANS_BG, fg=ANS_FG,
+                        font=(FONT, 8), anchor="w", justify="left", wraplength=S(256),
+                        padx=S(4), pady=S(2), cursor="hand2")
+        prev.pack(fill="x", pady=(S(2), 0))
+        prev.bind("<Button-1>", lambda ev: self.toggle_answer(key))
+
+    def toggle_answer(self, key):
+        self.answer_open = None if self.answer_open == key else key
+        self.update_bubble(force=True)
+
+    def add_reply(self, row, key, e):
+        """끝난 데스크톱 앱 세션에 로봇에서 바로 이어서 글을 보낸다."""
+        box = tk.Frame(row, bg=INNER)
+        box.pack(fill="x", pady=(S(2), 0))
+        if e.get("sending"):
+            tk.Label(box, text=t("reply_sending"), bg=INNER, fg=SUB,
+                     font=(FONT, 8)).pack(anchor="w")
+            return
+        if self.reply_open == key:
+            self.reply_entry(box, key)
+            return
+        btns = tk.Frame(box, bg=INNER)
+        btns.pack(anchor="w")
+        self.chip(btns, t("reply_write"), lambda: self.open_other(key), sub=True)
 
     def focus_entry(self, ent):
         # 투명 창은 그냥은 키보드를 못 받아서, 말풍선 창을 앞으로 올린 뒤 입력칸에 커서를 둔다
@@ -1957,10 +2089,11 @@ class Pet:
         e["sending"] = True
         self.reply_key, self.reply_open = key, None
         self.reply_var.set("")
+        vs = e.get("entry") == "claude-vscode"
         if e.get("card"):            # 질문 카드: 고르고 제출 (기타면 글을 넣어서)
-            GPT.card(e["title"], "" if other else text, text if other else "")
-        else:                        # 다음 단계 상자: 입력창에 글을 넣어 보내기
-            GPT.reply(e["title"], text)
+            GPT.card(e["title"], "" if other else text, text if other else "", vscode=vs)
+        else:                        # 다음 단계 상자·끝난 세션: 입력창에 글을 넣어 보내기
+            GPT.reply(e["title"], text, vscode=vs)
         self.update_bubble(force=True)
 
     def reply_done(self, result):

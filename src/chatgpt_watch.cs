@@ -9,6 +9,7 @@
 //   표준 입력: open<TAB>제목 / openclaude<TAB>제목   → 그 대화 줄을 눌러 연다 (로봇에서 더블 클릭했을 때만)
 //              replyclaude<TAB>세션 제목<TAB>글(base64) → Claude 앱 그 Code 세션에 글을 넣어 보냄 (로봇에서 선택지를 눌렀을 때만)
 //              cardclaude<TAB>세션 제목<TAB>선택지(base64)<TAB>기타 글(base64) → 그 세션의 질문 카드에서 골라 제출
+//              replyvscode / cardvscode (같은 모양) → VS Code의 Claude Code 패널(제목이 그 세션인 것)에 같은 일
 //   Claude 창은 앞으로 가져오지 않는다. 다른 창 뒤에 가려져 있으면 그대로 두고 클릭 신호만 창에 보낸다.
 //   최소화돼 있으면 앱이 완전히 쉬어서, 처리하는 동안만 눈에 안 보이게(투명·클릭 통과) 되살렸다가 다시 최소화한다.
 //   쓰던 창의 포커스와 마우스는 건드리지 않는다. 단계 기록은 이 프로그램 옆 card.log 에 남긴다.
@@ -454,6 +455,167 @@ class ChatGptWatch
         });
     }
 
+    // ---- VS Code의 Claude Code 패널 (창마다 웹 화면 안에 있고, 위쪽 제목 버튼이 세션 이름) ----
+    // 그 세션 패널을 찾아 창을 안 보이게 깨운 뒤 work(패널, 창) → 창 원래대로. 세션을 바꿔 주지는 않는다.
+    static string InVsCode(string title, Func<AutomationElement, IntPtr, string> work)
+    {
+        var wins = AppWindows("Code");
+        if (wins.Count == 0) return "VS Code가 열려 있지 않아요";
+        foreach (var w in wins)
+        {
+            AutomationElement panel = null;
+            try
+            {
+                w.FindAll(TreeScope.Descendants, Condition.TrueCondition);   // 처음엔 일부만 보여서 한 번 깨운다
+                foreach (AutomationElement b in w.FindAll(TreeScope.Descendants,
+                             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)))
+                {
+                    if ((b.Current.ClassName ?? "").Contains("titleText") && (b.Current.Name ?? "").Trim() == title)
+                    {
+                        // 제목 버튼에서 위로 올라가 그 패널의 웹 화면 전체(Document)를 범위로 쓴다
+                        var walker = TreeWalker.ControlViewWalker;
+                        for (var p = walker.GetParent(b); p != null; p = walker.GetParent(p))
+                            if (p.Current.ControlType == ControlType.Document) { panel = p; break; }
+                        break;
+                    }
+                }
+            }
+            catch { continue; }
+            if (panel == null) continue;
+            var hwnd = new IntPtr(w.Current.NativeWindowHandle);
+            Shown shown = null;
+            try
+            {
+                Log("시작(VS Code): " + title);
+                shown = Wake(hwnd);
+                if (shown.Ghost) Log(shown.Iconic ? "최소화돼 있어서 안 보이게 되살림" : "뒤에 있어서 안 보이게 깨움");
+                string result = work(panel, hwnd);
+                Log("결과: " + result);
+                return result;
+            }
+            finally { Unwake(shown); Log("끝"); }
+        }
+        return "VS Code에서 그 세션(" + title + ") 화면을 찾지 못했어요. Claude 패널에 그 세션을 열어 두세요";
+    }
+
+    static AutomationElement ByClass(AutomationElement scope, string part, ControlType type)
+    {
+        foreach (AutomationElement e in scope.FindAll(TreeScope.Descendants,
+                     new PropertyCondition(AutomationElement.ControlTypeProperty, type)))
+            try { if ((e.Current.ClassName ?? "").Contains(part)) return e; } catch { }
+        return null;
+    }
+
+    // VS Code 입력창은 비어 있으면 안내 문구("Ask Claude to edit…", "Queue another message…")를 값으로 돌려준다
+    static string VsText(ValuePattern vp)
+    {
+        string v = vp.Current.Value ?? "";
+        return v.EndsWith("…") && v.Length < 80 && v.IndexOf('\n') < 0 ? "" : v;
+    }
+
+    static string ReplyVsCode(string title, string text)
+    {
+        return InVsCode(title, (p, hwnd) =>
+        {
+            var ed = ByClass(p, "messageInput", ControlType.Edit);
+            object vpo;
+            if (ed == null || !ed.TryGetCurrentPattern(ValuePattern.Pattern, out vpo)) return "입력창을 찾지 못했어요";
+            var vp = (ValuePattern)vpo;
+            Log("입력창 값: [" + (vp.Current.Value ?? "") + "]");
+            if (VsText(vp).Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
+            string head = text.Trim();
+            head = head.Substring(0, Math.Min(10, head.Length));
+            if (!ClickOn(ed, hwnd)) return "입력창 자리를 찾지 못했어요";
+            Thread.Sleep(200);
+            TypeText(hwnd, text);
+            string got = "";
+            if (!WaitFor(() => (got = (vp.Current.Value ?? "")).Contains(head), 3000))
+            {
+                Erase(hwnd, got.Length + 2);
+                return "입력창에 글을 넣지 못했어요";
+            }
+            Log("입력창에 글 넣음");
+            for (int k = 0; k < 3; k++)
+            {
+                // 답하는 중엔 이 버튼이 Stop 이라 누르면 멈춰 버린다 → Stop 이 아닐 때만
+                AutomationElement send = null;
+                WaitFor(() => (send = ByClass(p, "sendButton", ControlType.Button)) != null
+                              && send.Current.IsEnabled && send.Current.Name != "Stop", 3000);
+                if (send == null || !send.Current.IsEnabled || send.Current.Name == "Stop" || !ClickOn(send, hwnd)) break;
+                if (WaitFor(() => !(vp.Current.Value ?? "").Contains(head), 2000)) { Log("보냄"); return "ok"; }
+            }
+            Erase(hwnd, VsText(vp).Length + 2);
+            return "보내기 버튼을 누르지 못했어요 (아직 답하는 중일 수 있어요)";
+        });
+    }
+
+    static string CardVsCode(string title, string label, string other)
+    {
+        return InVsCode(title, (p, hwnd) =>
+        {
+            bool isOther = !string.IsNullOrEmpty(other);
+            AutomationElement opt = null;
+            foreach (AutomationElement b in p.FindAll(TreeScope.Descendants,
+                         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton)))
+            {
+                string n;
+                try { n = (b.Current.Name ?? "").Trim(); } catch { continue; }
+                if (isOther ? n == "Other" || n == "기타" : n == label || n.StartsWith(label + " ")) { opt = b; break; }
+            }
+            if (opt == null) return "그 세션에서 질문 카드를 찾지 못했어요 (이미 답했을 수 있어요)";
+            var sel = (SelectionItemPattern)opt.GetCurrentPattern(SelectionItemPattern.Pattern);
+            Log("선택지 찾음: " + opt.Current.Name + " / 골라짐 " + sel.Current.IsSelected);
+            bool on = sel.Current.IsSelected;
+            for (int k = 0; k < 14 && !on; k++)
+            {
+                if (!ClickOn(opt, hwnd)) return "선택지 자리를 찾지 못했어요";
+                on = WaitFor(() => sel.Current.IsSelected, 700);
+                Log("선택지 클릭 " + (k + 1) + "번째 → " + (on ? "골라짐" : "아직"));
+            }
+            if (!on) return "선택이 확인되지 않아 제출하지 않았어요";
+            if (isOther)
+            {
+                // Other 를 고르면 카드 안에 입력칸이 생긴다 (아래 메시지 입력창과는 다른 것)
+                AutomationElement box = null;
+                WaitFor(() =>
+                {
+                    foreach (AutomationElement x in p.FindAll(TreeScope.Descendants,
+                                 new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit)))
+                        if (!(x.Current.ClassName ?? "").Contains("messageInput")) { box = x; return true; }
+                    return false;
+                }, 3000);
+                object vpo;
+                if (box == null || !box.TryGetCurrentPattern(ValuePattern.Pattern, out vpo))
+                    return "기타 입력칸을 찾지 못해 제출하지 않았어요";
+                var vp = (ValuePattern)vpo;
+                string head = other.Trim();
+                head = head.Substring(0, Math.Min(10, head.Length));
+                if (!ClickOn(box, hwnd)) return "기타 입력칸 자리를 찾지 못했어요";
+                Thread.Sleep(200);
+                Erase(hwnd, (vp.Current.Value ?? "").Length);
+                TypeText(hwnd, other);
+                if (!WaitFor(() => (vp.Current.Value ?? "").Contains(head), 3000))
+                    return "기타 입력칸에 글을 넣지 못해 제출하지 않았어요";
+            }
+            Func<AutomationElement> submitBtn = () =>
+            {
+                foreach (AutomationElement b in p.FindAll(TreeScope.Descendants,
+                             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)))
+                    try { if ((b.Current.Name ?? "").Contains("Submit")) return b; } catch { }
+                return null;
+            };
+            for (int k = 0; k < 3; k++)
+            {
+                var submit = submitBtn();
+                if (submit == null) return k == 0 ? "제출 버튼을 찾지 못했어요" : "ok";
+                if (!submit.Current.IsEnabled || !ClickOn(submit, hwnd)) return "제출 버튼을 누르지 못했어요";
+                Log("제출 클릭 " + (k + 1) + "번째");
+                if (WaitFor(() => submitBtn() == null, 2500)) return "ok";
+            }
+            return "제출이 확인되지 않았어요. VS Code에서 확인해 주세요";
+        });
+    }
+
     static long Hwnd(List<AutomationElement> wins)
     {
         foreach (var w in wins)
@@ -503,6 +665,21 @@ class ChatGptWatch
                     var parts = cmd.Split('\t');
                     string r;
                     try { r = Reply(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))); }
+                    catch (Exception ex) { r = "보내는 중 오류: " + ex.Message; }
+                    Console.Out.WriteLine("{\"reply\":" + Json(r) + "}");
+                    Console.Out.Flush();
+                }
+                if (cmd != null && (cmd.StartsWith("replyvscode\t") || cmd.StartsWith("cardvscode\t")))
+                {
+                    // replyvscode<TAB>세션 제목<TAB>글(base64) / cardvscode<TAB>세션 제목<TAB>선택지(base64)<TAB>기타(base64)
+                    var parts = cmd.Split('\t');
+                    string r;
+                    try
+                    {
+                        Func<string, string> dec = x => Encoding.UTF8.GetString(Convert.FromBase64String(x));
+                        r = parts[0] == "replyvscode" ? ReplyVsCode(parts[1], dec(parts[2]))
+                            : CardVsCode(parts[1], dec(parts[2]), parts.Length > 3 ? dec(parts[3]) : "");
+                    }
                     catch (Exception ex) { r = "보내는 중 오류: " + ex.Message; }
                     Console.Out.WriteLine("{\"reply\":" + Json(r) + "}");
                     Console.Out.Flush();
