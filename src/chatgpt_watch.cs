@@ -207,10 +207,11 @@ class ChatGptWatch
 
     // Claude 창이 채팅 화면인지 (Code 탭이면 채팅 목록이 안 보이므로 '끝남'으로 착각하지 않게 판단을 미룬다),
     // 그리고 지금 보이는 대화가 답하는 중인지 ('응답 중지' 버튼)
-    static void ClaudeView(AutomationElement w, out bool chatView, out bool stopShown)
+    static void ClaudeView(AutomationElement w, out bool chatView, out bool stopShown, out string session)
     {
         chatView = true;
         stopShown = false;
+        session = null;                 // Code 화면에 띄워 둔 세션 제목 ("제목, 세션 이름 바꾸기" 버튼)
         var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
         foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
         {
@@ -218,7 +219,32 @@ class ChatGptWatch
             try { n = b.Current.Name ?? ""; } catch { continue; }
             if (n == "터미널" || n == "세션 패널" || n == "Terminal") chatView = false;
             if (n == "응답 중지" || n == "Stop response") stopShown = true;
+            foreach (var tail in new[] { ", 세션 이름 바꾸기", ", Rename session" })
+                if (session == null && n.EndsWith(tail)) session = n.Substring(0, n.Length - tail.Length);
         }
+    }
+
+    struct RECT { public int L, T, R, B; }
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+
+    // 창이 화면에 실제로 보이는지: 창 안에 점을 고르게 찍어 그 자리 맨 위가 이 창인 비율이 1/4 이상이면 보인다.
+    // 맨 앞이 아니어도 나란히 띄워 두면 보는 중이고, 최소화되거나 거의 가려지면 안 보는 중으로 친다.
+    static bool OnScreen(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || IsIconic(hwnd) || !IsWindowVisible(hwnd)) return false;
+        RECT r;
+        if (!GetWindowRect(hwnd, out r) || r.R - r.L < 50 || r.B - r.T < 50) return false;
+        int hit = 0, n = 0;
+        for (int i = 1; i <= 6; i++)
+            for (int j = 1; j <= 6; j++)
+            {
+                var pt = new POINT { X = r.L + (r.R - r.L) * i / 7, Y = r.T + (r.B - r.T) * j / 7 };
+                n++;
+                if (GetAncestor(WindowFromPoint(pt), 2) == hwnd) hit++;   // GA_ROOT
+            }
+        return hit * 4 >= n;
     }
 
     static void Open(string process, Func<AutomationElement, bool> isRow, string title)
@@ -706,16 +732,37 @@ class ChatGptWatch
             {
                 var gpt = AppWindows("ChatGPT");
                 var titles = new List<string>();
+                // 화면에 보이는 앱 (Claude 앱·ChatGPT 앱은 띄워 둔 대화까지, VS Code는 패널의 세션이 다 보이므로 앱만)
+                var seen = new List<string>();
+                string seenSession = "", gptSession = "";
                 foreach (var w in gpt)
+                {
                     titles.AddRange(WorkingTitles(w, IsGptRow).Where(t => !titles.Contains(t)));
+                    if (!seen.Contains("chatgpt") && OnScreen(new IntPtr(w.Current.NativeWindowHandle)))
+                    {
+                        // 웹 화면 전체(Document)의 이름 = 지금 열어 둔 대화 제목
+                        var doc = w.FindFirst(TreeScope.Descendants,
+                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document));
+                        seen.Add("chatgpt");
+                        gptSession = doc == null ? "" : (doc.Current.Name ?? "").Trim();
+                    }
+                }
 
                 var cla = AppWindows("claude");
                 var ctitles = new List<string>();
                 bool claudeOk = false;
+                foreach (var w in AppWindows("Code"))
+                    if (!seen.Contains("code") && OnScreen(new IntPtr(w.Current.NativeWindowHandle))) seen.Add("code");
                 foreach (var w in cla)
                 {
                     bool chatView, stopShown;
-                    ClaudeView(w, out chatView, out stopShown);
+                    string session;
+                    ClaudeView(w, out chatView, out stopShown, out session);
+                    if (session != null && seenSession == "" && OnScreen(new IntPtr(w.Current.NativeWindowHandle)))
+                    {
+                        seen.Add("claude");
+                        seenSession = session;
+                    }
                     if (!chatView) continue;
                     claudeOk = true;
                     var found = WorkingTitles(w, IsClaudeRow);
@@ -727,7 +774,9 @@ class ChatGptWatch
                 msg = "{\"ok\":" + (gpt.Count > 0 ? "true" : "false") + ",\"hwnd\":" + Hwnd(gpt)
                       + ",\"working\":[" + string.Join(",", titles.Select(Json)) + "]"
                       + ",\"claude_ok\":" + (claudeOk ? "true" : "false") + ",\"claude_hwnd\":" + Hwnd(cla)
-                      + ",\"claude\":[" + string.Join(",", ctitles.Select(Json)) + "]}";
+                      + ",\"claude\":[" + string.Join(",", ctitles.Select(Json)) + "]"
+                      + ",\"seen\":[" + string.Join(",", seen.Select(Json)) + "]"
+                      + ",\"seen_session\":" + Json(seenSession) + ",\"seen_gpt\":" + Json(gptSession) + "}";
             }
             catch (Exception)
             {

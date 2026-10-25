@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -81,6 +81,13 @@ T = {
     "clear": ("완료 기록 모두 지우기", "Clear finished"),
     "quit": ("종료", "Quit"),
     "mute": ("소리 끄기", "Mute sounds"),
+    "settings": ("설정", "Settings"),
+    "autohide": ("말풍선 자동 숨기기", "Auto-hide bubble"),
+    "autohide_off": ("안 함", "Never"),
+    "sec": ("{n}초 뒤", "after {n}s"),
+    "min1": ("1분 뒤", "after 1 min"),
+    "hide_viewed": ("화면에 보이는 세션은 알리지 않기", "Don't notify for sessions on screen"),
+    "answer_preview": ("끝난 답변 미리보기", "Show finished answers"),
     "ext_menu": ("브라우저 확장 설치 (웹 스토어)", "Install browser extension (Web Store)"),
     "reply_other": ("기타", "Other"),
     "reply_write": ("답장", "Reply"),
@@ -1634,6 +1641,9 @@ class Pet:
         self.answer_open = None       # 답변을 펼쳐 둔 줄
         self.reply_key = None         # 답을 보내는 중인 줄
         self.reply_var = tk.StringVar(self.root)
+        # 화면에 보이는 앱("claude"·"code"·"chatgpt")들, Claude 앱에 띄워 둔 세션 제목, ChatGPT 앱에 띄워 둔 대화 제목
+        self.seen = ((), "", "")
+        self.shown_at = time.time()   # 말풍선이 (다시) 보이기 시작한 때 — 자동 숨김 기준
         # 사용자 설정: 로봇 위치, 소리 끄기
         global MUTED
         self.settings = read_json(SETTINGS, {})
@@ -1676,6 +1686,11 @@ class Pet:
 
     # ---- 신호 ----
     def on_event(self, kind, key):
+        e = self.tracker.tasks.get(key)
+        if e and self.viewed(e):
+            return                    # 그 세션을 지금 보고 있으면 알리지 않는다
+        if self.hidden:
+            self.shown_at = time.time()
         self.hidden = False
         if kind == "done":
             self.happy_until = time.time() + 8
@@ -1706,6 +1721,7 @@ class Pet:
             self.hidden = not self.hidden
             if not self.hidden:
                 self.happy_until = 0.0
+                self.shown_at = time.time()
             self.update_bubble(force=True)
 
     def menu(self, e):
@@ -1714,12 +1730,81 @@ class Pet:
         m.add_command(label=f"{APP} {VERSION}", state="disabled")
         m.add_separator()
         m.add_command(label=t("clear"), command=self.clear_done)
-        m.add_command(label=("✓ " if MUTED else "   ") + t("mute"), command=self.toggle_mute)
+        m.add_cascade(label=t("settings"), menu=self.settings_menu(m))
         m.add_command(label=t("ext_menu"), command=self.get_extension)
         m.add_separator()
         m.add_command(label=t("uninstall"), command=self.do_uninstall)
         m.add_command(label=t("quit"), command=self.root.destroy)
         m.tk_popup(e.x_root, e.y_root)
+
+    # ---- 보고 있는 창은 알리지 않기 · 말풍선 자동 숨김 ----
+    def viewed(self, e):
+        """그 줄의 세션을 지금 화면에서 보고 있는지 (맨 앞이 아니어도 창이 화면에 보이면 보는 중).
+        VS Code는 패널에 세션이 다 보이므로 VS Code 창이 보이면 VS Code 세션 모두,
+        Claude 앱·ChatGPT 앱(일반 채팅·Codex)은 띄워 둔 그 대화만."""
+        if not self.settings.get("hide_viewed", True):
+            return False
+        apps, session, gpt = self.seen
+        if e.get("src") in ("chatgpt", "codex"):
+            return "chatgpt" in apps and bool(gpt) and e.get("title") == gpt
+        if e.get("src") != "claude":
+            return False
+        if e.get("entry") == "claude-vscode":
+            return "code" in apps
+        return "claude" in apps and bool(session) and e.get("title") == session
+
+    def shown_tasks(self):
+        return {k: e for k, e in self.tracker.tasks.items() if not self.viewed(e)}
+
+    def auto_hide(self):
+        # 숨겨 둔 사이 새 줄이 생기면(신호 없이 생기는 줄도 있음) 다시 보인다
+        keys = set(self.shown_tasks())
+        if keys - getattr(self, "_known_keys", keys) and self.hidden:
+            self.hidden = False
+            self.shown_at = time.time()
+            self.update_bubble(force=True)
+        self._known_keys = keys
+        sec = self.settings.get("autohide", 0)
+        if not sec or self.hidden or self.reply_open or self.answer_open:
+            return
+        if any(e.get("sending") for e in self.tracker.tasks.values()):
+            return
+        try:                          # 말풍선 위에 마우스를 올려 두면 읽는 중이니 기다린다
+            px, py = self.root.winfo_pointerxy()
+            b = self.bubble
+            if (b.state() != "withdrawn" and b.winfo_rootx() <= px <= b.winfo_rootx() + b.winfo_width()
+                    and b.winfo_rooty() <= py <= b.winfo_rooty() + b.winfo_height()):
+                self.shown_at = time.time()
+                return
+        except tk.TclError:
+            pass
+        if time.time() - self.shown_at > sec:
+            self.hidden = True
+            self.update_bubble(force=True)
+
+    def set_setting(self, key, value):
+        self.save_setting(key, value)
+        self.shown_at = time.time()
+        self.update_bubble(force=True)
+
+    def settings_menu(self, parent):
+        sm = tk.Menu(parent, tearoff=0, bg=INNER, fg=FG,
+                     activebackground=ACCENT, activeforeground="#1b1c20")
+        hide = tk.Menu(sm, tearoff=0, bg=INNER, fg=FG,
+                       activebackground=ACCENT, activeforeground="#1b1c20")
+        cur = self.settings.get("autohide", 0)
+        for sec, label in ((0, t("autohide_off")), (10, t("sec", n=10)), (30, t("sec", n=30)),
+                           (60, t("min1"))):
+            hide.add_command(label=("● " if cur == sec else "○ ") + label,
+                             command=lambda v=sec: self.set_setting("autohide", v))
+        sm.add_cascade(label=t("autohide"), menu=hide)
+        flags = (("hide_viewed", True, t("hide_viewed")), ("answer_preview", True, t("answer_preview")))
+        for key, default, label in flags:
+            on = self.settings.get(key, default)
+            sm.add_command(label=("✓ " if on else "   ") + label,
+                           command=lambda k=key, v=not on: self.set_setting(k, v))
+        sm.add_command(label=("✓ " if MUTED else "   ") + t("mute"), command=self.toggle_mute)
+        return sm
 
     def get_extension(self):
         # Chrome 웹 스토어 페이지를 기본 브라우저로 연다 (Chrome·Brave·Edge 모두 여기서 설치)
@@ -1796,6 +1881,11 @@ class Pet:
             rep = GPT.take() if GPT else None
             if rep:
                 self.tracker.apply_chatgpt(rep)
+                seen = (tuple(rep.get("seen") or ()), rep.get("seen_session", ""), rep.get("seen_gpt", ""))
+                if seen != self.seen:
+                    self.seen = seen
+                    self.update_bubble(force=True)
+            self.auto_hide()
             res = GPT.take_reply() if GPT else None
             if res:
                 self.reply_done(res)
@@ -1812,7 +1902,7 @@ class Pet:
         self.root.after(400, self.tick)
 
     def mode(self):
-        st = [e.get("status") for e in self.tracker.tasks.values()]
+        st = [e.get("status") for e in self.shown_tasks().values()]
         if "waiting" in st:
             return "alert"
         if "working" in st:
@@ -1842,13 +1932,13 @@ class Pet:
                 y = self.pad_y + ry * px + bounce
                 c.create_rectangle(x, y, x + px, y + px, fill=color, width=0)
 
-        st = [e.get("status") for e in self.tracker.tasks.values()]
+        st = [e.get("status") for e in self.shown_tasks().values()]
         n = st.count("working")
         badge = None
         if "waiting" in st:
             badge = (RED, "!")
         elif n:
-            srcs = {e.get("src") for e in self.tracker.tasks.values()
+            srcs = {e.get("src") for e in self.shown_tasks().values()
                     if e.get("status") == "working"}
             # 진행 중인 것이 모두 같은 색이면 그 색, 섞여 있으면 기본 주황
             colors = {SRC_COLOR.get(s, ACCENT) for s in srcs}
@@ -1885,7 +1975,7 @@ class Pet:
 
     def update_bubble(self, force=False):
         order = {"waiting": 0, "working": 1, "done": 2}
-        items = sorted(self.tracker.tasks.items(),
+        items = sorted(self.shown_tasks().items(),
                        key=lambda kv: (order.get(kv[1].get("status"), 3),
                                        -kv[1].get("start", 0)))
         if not items or self.hidden:
@@ -1956,7 +2046,8 @@ class Pet:
             for w in widgets:
                 w.bind("<Button-1>", lambda ev, k=key: self.row_click(k))
                 w.configure(cursor="hand2")
-            if status in ("done", "waiting") and e.get("src") == "claude" and e.get("answer"):
+            if (status in ("done", "waiting") and e.get("src") == "claude" and e.get("answer")
+                    and self.settings.get("answer_preview", True)):
                 self.add_answer(row, key, e, compact)
             if status == "waiting" and e.get("src") == "claude" and e.get("ask"):
                 self.add_choices(row, key, e)
