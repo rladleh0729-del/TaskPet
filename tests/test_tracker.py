@@ -101,6 +101,26 @@ ask_rec["message"]["content"][0]["input"]["actions"] = json.dumps([{"label": "�
 with open(tp2, "w", encoding="utf-8") as f:
     f.write(json.dumps(ask_rec) + "\n")
 assert taskpet.claude_turn_asks(tp2, time.time() - 5)["choices"] == [{"label": "네", "message": "네"}]
+
+# 질문 카드(AskUserQuestion): 답이 없으면 질문·선택지, 답(tool_result)이 생기면 None
+tp3 = os.path.join(tmp, "card.jsonl")
+card_use = {"message": {"content": [{"type": "tool_use", "id": "tu1", "name": "AskUserQuestion",
+            "input": {"questions": [{"question": "무엇을 할까요?", "multiSelect": False,
+                                     "options": [{"label": "A안", "description": "설명"},
+                                                 {"label": "B안"}]}]}}]}}
+with open(tp3, "w", encoding="utf-8") as f:
+    f.write(json.dumps(card_use) + "\n")
+got = taskpet.claude_pending_card(tp3)
+assert got == {"ask": "무엇을 할까요?", "card": True,
+               "choices": [{"label": "A안", "message": "A안"}, {"label": "B안", "message": "B안"}]}, got
+with open(tp3, "a", encoding="utf-8") as f:
+    f.write(json.dumps({"message": {"content": [{"type": "tool_result", "tool_use_id": "tu1"}]}}) + "\n")
+assert taskpet.claude_pending_card(tp3) is None
+card_use["message"]["content"][0]["id"] = "tu2"
+card_use["message"]["content"][0]["input"]["questions"][0]["multiSelect"] = True
+with open(tp3, "a", encoding="utf-8") as f:
+    f.write(json.dumps(card_use) + "\n")
+assert taskpet.claude_pending_card(tp3)["choices"] == []      # 여러 개 고르기는 질문만
 ev("end")                                   # 앱이 세션을 닫아도 질문 대기는 남음
 assert tr.tasks["c:s1"]["status"] == "waiting"
 
