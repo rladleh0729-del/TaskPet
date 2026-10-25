@@ -293,4 +293,25 @@ tr.apply_ext_tip(True)
 assert tr.tasks["t:ext"]["status"] == "tip"
 tr.apply_ext_tip(False)
 assert "t:ext" not in tr.tasks
+
+# 마지막 답변: 마지막 도구 사용 뒤의 글만, 굵게·코드 표시는 빼고, 세션을 연 곳도 같이
+tp4 = os.path.join(tmp, "answer.jsonl")
+recs = [
+    {"type": "user", "entrypoint": "claude-desktop", "message": {"role": "user", "content": "질문"}},
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "먼저 볼게요"}]}},
+    {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Read"}]}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
+    {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "..."},
+                                                   {"type": "text", "text": "## 결과\n**됐어요** `a.py`"}]}},
+]
+with open(tp4, "w", encoding="utf-8") as f:
+    for r in recs:
+        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+assert taskpet.claude_last_answer(tp4) == ("결과\n됐어요 a.py", "claude-desktop", ""), taskpet.claude_last_answer(tp4)
+# VS Code 세션은 자동 제목(ai-title)이 줄 제목이 된다 (패널에서 그 이름으로 찾음)
+with open(tp4, "a", encoding="utf-8") as f:
+    f.write(json.dumps({"type": "ai-title", "aiTitle": "인사", "entrypoint": "claude-vscode"}) + "\n")
+row = {"id": "nosuch"}
+taskpet.Tracker.note_answer(row, tp4)
+assert row["entry"] == "claude-vscode" and row["title"] == "인사", row
 print("통과", events)
