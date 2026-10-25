@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.6"
+VERSION = "1.4.7"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -658,6 +658,19 @@ class ChatGptWatcher:
         except OSError:
             self.reply_result = t("reply_nohelper")
 
+    def card(self, title, label, other=""):
+        """질문 카드(AskUserQuestion)에서 선택지(또는 '기타' + 글)를 골라 제출한다. 결과는 take_reply()."""
+        self.reply_result = None
+        if not (self.proc and self.proc.poll() is None):
+            self.reply_result = t("reply_nohelper")
+            return
+        enc = lambda s: base64.b64encode(s.encode("utf-8")).decode("ascii")
+        try:
+            self.proc.stdin.write(f"cardclaude\t{title}\t{enc(label)}\t{enc(other)}\n".encode("utf-8"))
+            self.proc.stdin.flush()
+        except OSError:
+            self.reply_result = t("reply_nohelper")
+
     def take_reply(self):
         r, self.reply_result = getattr(self, "reply_result", None), None
         return r
@@ -949,6 +962,47 @@ def claude_turn_asks(transcript, since):
                                         "message": str(a.get("message") or a["label"])})
                 return {"ask": str(inp["ask"]).strip()[:120], "choices": choices}
         return None
+    return None
+
+
+def claude_pending_card(transcript):
+    """아직 답하지 않은 질문 카드(AskUserQuestion)가 있으면 {"ask", "choices", "card": True}, 없으면 None.
+    질문 하나·하나만 고르는 카드만 선택지를 꺼낸다 (나머지는 질문만 보여 주고 앱에서 답하게)."""
+    try:
+        size = os.path.getsize(transcript)
+        with open(transcript, "rb") as f:
+            f.seek(max(0, size - 600_000))
+            tail = f.read()
+    except OSError:
+        return None
+    answered = set()
+    for line in reversed(tail.splitlines()):
+        if b"tool_result" not in line and b'"AskUserQuestion"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        for part in (rec.get("message") or {}).get("content") or []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "tool_result":
+                answered.add(part.get("tool_use_id"))
+            elif part.get("name") == "AskUserQuestion":
+                if part.get("id") in answered:
+                    return None           # 마지막 카드는 이미 답함
+                qs = (part.get("input") or {}).get("questions") or []
+                if not qs or not isinstance(qs[0], dict):
+                    return None
+                q = qs[0]
+                choices = []
+                if len(qs) == 1 and not q.get("multiSelect"):
+                    for o in q.get("options") or []:
+                        if isinstance(o, dict) and o.get("label"):
+                            choices.append({"label": str(o["label"])[:24],
+                                            "message": str(o["label"])})
+                return {"ask": str(q.get("question") or "").strip()[:120],
+                        "choices": choices, "card": True}
     return None
 
 
@@ -1245,6 +1299,10 @@ class Tracker:
             if e and e.get("status") == "working":
                 e["status"] = "waiting"
                 e["wait_start"] = ts
+                # 질문 카드(AskUserQuestion)로 멈췄으면 질문·선택지를 꺼내 둔다 (로봇에서 바로 고를 수 있게)
+                card = claude_pending_card(d.get("transcript_path") or e.get("transcript", "")) if live else None
+                if card:
+                    e["ask"], e["choices"], e["card"] = card["ask"], card["choices"], True
                 if live:
                     self.on_event("wait", key)
         elif ev == "resume":
@@ -1263,11 +1321,11 @@ class Tracker:
                 self.on_event("start", key)
             elif e.get("status") == "waiting":
                 e["status"] = "working"
-                for k in ("wait_start", "ask", "choices", "sending"):
+                for k in ("wait_start", "ask", "choices", "card", "sending"):
                     e.pop(k, None)
         elif ev == "stop":
             if e and e.get("status") in ("working", "waiting"):
-                for k in ("wait_start", "ask", "choices", "sending"):
+                for k in ("wait_start", "ask", "choices", "card", "sending"):
                     e.pop(k, None)
                 e["title"] = claude_title(d) or e.get("title", "")
                 tp = d.get("transcript_path") or e.get("transcript", "")
@@ -1342,6 +1400,13 @@ class Tracker:
                             e["wait_start"] = time.time()
                             e["ask"], e["choices"] = asks["ask"], asks["choices"]
                             self.on_event("wait", key)
+            # 질문 카드로 멈춰 있는데 선택지를 아직 못 꺼냈으면(로봇을 다시 켰을 때 등) 꺼내 둔다
+            if (e.get("src") == "claude" and e.get("status") == "waiting" and not e.get("ask")
+                    and e.get("transcript")):
+                card = claude_pending_card(e["transcript"])
+                if card:
+                    e["ask"], e["choices"], e["card"] = card["ask"], card["choices"], True
+                    self.dirty = True
             if e.get("src") == "claude" and not e.get("title") and e.get("transcript"):
                 title = claude_title({"transcript_path": e["transcript"],
                                       "session_id": e["id"]})
@@ -1865,6 +1930,8 @@ class Pet:
             tk.Label(box, text=t("reply_sending"), bg=INNER, fg=SUB,
                      font=(FONT, 8)).pack(anchor="w")
             return
+        if e.get("card") and not e.get("choices"):
+            return            # 여러 문항·여러 개 고르기 카드는 질문만 보여 주고 앱에서 답하게
         btns = tk.Frame(box, bg=INNER)
         btns.pack(anchor="w", pady=(S(3), 0))
         for c in e.get("choices") or []:
@@ -1876,9 +1943,9 @@ class Pet:
             ent = tk.Entry(f, textvariable=self.reply_var, bg="#2e2636", fg=FG,
                            insertbackground=FG, relief="flat", font=(FONT, 9), width=26)
             ent.pack(side="left", fill="x", expand=True, ipady=S(2), padx=(0, S(4)))
-            ent.bind("<Return>", lambda ev: self.send_reply(key, self.reply_var.get()))
+            ent.bind("<Return>", lambda ev: self.send_reply(key, self.reply_var.get(), other=True))
             ent.bind("<Escape>", lambda ev: self.open_other(None))
-            self.chip(f, t("reply_send"), lambda: self.send_reply(key, self.reply_var.get()))
+            self.chip(f, t("reply_send"), lambda: self.send_reply(key, self.reply_var.get(), other=True))
             self.root.after(60, lambda: self.focus_entry(ent))
 
     def focus_entry(self, ent):
@@ -1896,7 +1963,7 @@ class Pet:
         self.reply_open = key
         self.update_bubble(force=True)
 
-    def send_reply(self, key, text):
+    def send_reply(self, key, text, other=False):
         e = self.tracker.tasks.get(key)
         text = (text or "").strip()
         if not e or not text or not GPT:
@@ -1907,7 +1974,10 @@ class Pet:
         e["sending"] = True
         self.reply_key, self.reply_open = key, None
         self.reply_var.set("")
-        GPT.reply(e["title"], text)
+        if e.get("card"):            # 질문 카드: 고르고 제출 (기타면 글을 넣어서)
+            GPT.card(e["title"], "" if other else text, text if other else "")
+        else:                        # 다음 단계 상자: 입력창에 글을 넣어 보내기
+            GPT.reply(e["title"], text)
         self.update_bubble(force=True)
 
     def reply_done(self, result):

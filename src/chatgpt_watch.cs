@@ -8,10 +8,14 @@
 //     ok / claude_ok 가 false 면 그 앱 창이 없거나 채팅 목록이 안 보이는 화면 → 판단을 미룬다
 //   표준 입력: open<TAB>제목 / openclaude<TAB>제목   → 그 대화 줄을 눌러 연다 (로봇에서 더블 클릭했을 때만)
 //              replyclaude<TAB>세션 제목<TAB>글(base64) → Claude 앱 그 Code 세션에 글을 넣어 보냄 (로봇에서 선택지를 눌렀을 때만)
+//              cardclaude<TAB>세션 제목<TAB>선택지(base64)<TAB>기타 글(base64) → 그 세션의 질문 카드에서 골라 제출
+//   Claude 창이 가려지거나 최소화돼 있으면 앱이 쉬어서 처리가 안 되므로, 처리하는 동안만 포커스 없이 맨 위에 띄웠다가
+//   끝나면 원래대로(최소화/뒤로) 돌려놓는다. 쓰던 창의 포커스와 마우스는 건드리지 않는다.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Automation;
@@ -20,6 +24,65 @@ class ChatGptWatch
 {
     static readonly object Lock = new object();
     static readonly Queue<string> Commands = new Queue<string>();
+
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10, SWP_SHOWWINDOW = 0x40;
+    struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr h, ref POINT p);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+
+    // 화면 읽기의 '누르기'(Toggle)는 이 카드가 제때 받지 않아서, 그 자리에 클릭 신호만 창에 직접 보낸다.
+    // 실제 마우스 포인터는 움직이지 않고 포커스도 바꾸지 않는다. 그 자리가 Claude 창이 아니면(가려짐) 누르지 않는다.
+    static bool ClickOn(AutomationElement e, IntPtr hwnd)
+    {
+        try
+        {
+            object si;
+            if (e.TryGetCurrentPattern(ScrollItemPattern.Pattern, out si)) ((ScrollItemPattern)si).ScrollIntoView();
+            Thread.Sleep(150);
+            var r = e.Current.BoundingRectangle;
+            if (r.IsEmpty || r.Width < 2) return false;
+            var pt = new POINT { X = (int)(r.X + Math.Min(40, r.Width / 2)), Y = (int)(r.Y + r.Height / 2) };
+            if (GetAncestor(WindowFromPoint(pt), 2) != hwnd) return false;   // GA_ROOT
+            ScreenToClient(hwnd, ref pt);
+            var lp = new IntPtr((pt.Y << 16) | (pt.X & 0xFFFF));
+            PostMessage(hwnd, 0x0200, IntPtr.Zero, lp);       // WM_MOUSEMOVE
+            PostMessage(hwnd, 0x0201, new IntPtr(1), lp);     // WM_LBUTTONDOWN
+            Thread.Sleep(60);
+            PostMessage(hwnd, 0x0202, IntPtr.Zero, lp);       // WM_LBUTTONUP
+            return true;
+        }
+        catch { return false; }
+    }
+
+    class Shown { public IntPtr Hwnd, Front; public bool Iconic, Skip; }
+
+    // 처리하는 동안만 포커스 없이 맨 위에 띄운다 (이미 맨 앞 창이면 그대로)
+    static Shown Surface(IntPtr hwnd)
+    {
+        var s = new Shown { Hwnd = hwnd, Front = GetForegroundWindow(), Iconic = IsIconic(hwnd) };
+        if (s.Front == hwnd) { s.Skip = true; return s; }
+        if (s.Iconic) ShowWindow(hwnd, 4);                                   // SW_SHOWNOACTIVATE
+        SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0,                        // HWND_TOPMOST
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        Thread.Sleep(400);                                                    // 앱이 깨어나 그릴 시간
+        return s;
+    }
+
+    static void Unsurface(Shown s)
+    {
+        if (s == null || s.Skip) return;
+        SetWindowPos(s.Hwnd, new IntPtr(-2), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);  // HWND_NOTOPMOST
+        if (s.Iconic) ShowWindow(s.Hwnd, 7);                                  // SW_SHOWMINNOACTIVE (다시 최소화)
+        else if (s.Front != IntPtr.Zero)                                      // 쓰던 창 뒤로
+            SetWindowPos(s.Hwnd, s.Front, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
 
     static string Json(string s)
     {
@@ -190,56 +253,127 @@ class ChatGptWatch
 
     // 그 세션으로 화면을 바꾸고(필요하면) 입력창에 글을 넣어 '보내기'를 누른 뒤, 원래 보던 세션으로 돌려놓는다.
     // 돌려주는 값: "ok" 또는 사용자에게 보여 줄 이유
-    static string Reply(string title, string text)
+    // 창을 잠깐 띄우고 → 그 세션으로 바꾸고 → work → 원래 세션으로 돌려놓고 → 창도 원래대로
+    static string InSession(string title, Func<AutomationElement, string> work)
     {
         var wins = AppWindows("claude");
         if (wins.Count == 0) return "Claude 앱이 열려 있지 않아요";
         var w = wins[0];
-        w.FindAll(TreeScope.Descendants, Condition.TrueCondition);   // 처음 읽을 땐 일부만 보여서 한 번 깨운다
-        string back = CurrentSession(w);
-        if (back == null) return "Claude 앱을 Code 화면으로 두고 다시 보내 주세요";
-        if (back != title)
+        Shown shown = null;
+        try
         {
-            if (!Press(SessionRow(w, title))) return "Claude 앱 목록에서 그 세션을 찾지 못했어요";
-            for (int i = 0; i < 30 && CurrentSession(w) != title; i++) Thread.Sleep(100);
-            if (CurrentSession(w) != title) return "그 세션으로 바꾸지 못했어요";
-            Thread.Sleep(300);
-        }
-        else back = null;                 // 이미 그 세션이면 돌아갈 필요 없음
-        string result;
-        var ed = ByName(w, "프롬프트", ControlType.Edit);
-        object vpo;
-        if (ed == null || !ed.TryGetCurrentPattern(ValuePattern.Pattern, out vpo)) result = "입력창을 찾지 못했어요";
-        else
-        {
-            var vp = (ValuePattern)vpo;
-            if ((vp.Current.Value ?? "").Trim().Length > 0)
-                result = "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
-            else
+            shown = Surface(new IntPtr(w.Current.NativeWindowHandle));
+            Log("창 띄움");
+            w.FindAll(TreeScope.Descendants, Condition.TrueCondition);   // 처음 읽을 땐 일부만 보여서 한 번 깨운다
+            string back = CurrentSession(w);
+            if (back == null) return "Claude 앱을 Code 화면으로 두고 다시 보내 주세요";
+            if (back != title)
             {
-                vp.SetValue(text);
-                Thread.Sleep(300);
-                string head = text.Trim();
-                head = head.Substring(0, Math.Min(10, head.Length));
-                if (!(vp.Current.Value ?? "").Contains(head)) result = "입력창에 글을 넣지 못했어요";
-                else
-                {
-                    var send = ByName(w, "보내기", ControlType.Button) ?? ByName(w, "Send", ControlType.Button);
-                    if (send == null || !send.Current.IsEnabled || !Press(send))
-                    {
-                        result = "보내기 버튼을 누르지 못했어요";
-                        try { vp.SetValue(""); } catch { }
-                    }
-                    else result = "ok";
-                }
+                if (!Press(SessionRow(w, title))) return "Claude 앱 목록에서 그 세션을 찾지 못했어요";
+                for (int i = 0; i < 40 && CurrentSession(w) != title; i++) Thread.Sleep(100);
+                if (CurrentSession(w) != title) return "그 세션으로 바꾸지 못했어요";
+                Thread.Sleep(400);
             }
+            else back = null;                 // 이미 그 세션이면 돌아갈 필요 없음
+            Log("세션 준비됨");
+            string result = work(w);
+            Log("결과: " + result);
+            if (back != null)
+            {
+                Thread.Sleep(500);
+                Press(SessionRow(w, back));      // 원래 보던 세션으로 화면을 돌려놓음
+                Thread.Sleep(300);
+            }
+            return result;
         }
-        if (back != null)
+        finally { Unsurface(shown); Log("창 되돌림"); }
+    }
+
+    static readonly DateTime T0 = DateTime.Now;
+    static void Log(string s) { try { Console.Error.WriteLine(((int)(DateTime.Now - T0).TotalMilliseconds) + "ms " + s); } catch { } }
+
+    static bool WaitFor(Func<bool> ok, int ms)
+    {
+        for (int i = 0; i * 100 < ms; i++)
         {
-            Thread.Sleep(500);
-            Press(SessionRow(w, back));      // 원래 보던 세션으로 화면을 돌려놓음
+            try { if (ok()) return true; } catch { }
+            Thread.Sleep(100);
         }
-        return result;
+        return false;
+    }
+
+    // 입력창(다음 단계 상자 답)에 글을 넣고 '보내기'
+    static string Reply(string title, string text)
+    {
+        return InSession(title, w =>
+        {
+            var ed = ByName(w, "프롬프트", ControlType.Edit);
+            object vpo;
+            if (ed == null || !ed.TryGetCurrentPattern(ValuePattern.Pattern, out vpo)) return "입력창을 찾지 못했어요";
+            var vp = (ValuePattern)vpo;
+            if ((vp.Current.Value ?? "").Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
+            vp.SetValue(text);
+            string head = text.Trim();
+            head = head.Substring(0, Math.Min(10, head.Length));
+            if (!WaitFor(() => (vp.Current.Value ?? "").Contains(head), 3000)) return "입력창에 글을 넣지 못했어요";
+            var send = ByName(w, "보내기", ControlType.Button) ?? ByName(w, "Send", ControlType.Button);
+            if (send == null || !send.Current.IsEnabled || !Press(send))
+            {
+                try { vp.SetValue(""); } catch { }
+                return "보내기 버튼을 누르지 못했어요";
+            }
+            return "ok";
+        });
+    }
+
+    // 질문 카드(AskUserQuestion)에서 선택지(또는 '기타' + 글)를 고르고, 골라진 게 확인되면 '제출'
+    static string Card(string title, string label, string other)
+    {
+        return InSession(title, w =>
+        {
+            bool isOther = !string.IsNullOrEmpty(other);
+            AutomationElement opt = null;
+            var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
+            foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
+            {
+                string n;
+                try { n = b.Current.Name ?? ""; } catch { continue; }
+                bool hit = isOther ? n == "기타" || n == "Other"
+                                   : n == label || n.StartsWith(label + " ");
+                object tpo;
+                if (hit && b.TryGetCurrentPattern(TogglePattern.Pattern, out tpo)) { opt = b; break; }
+            }
+            if (opt == null) return "그 세션에서 질문 카드를 찾지 못했어요 (이미 답했을 수 있어요)";
+            var hwnd = new IntPtr(w.Current.NativeWindowHandle);
+            var tp = (TogglePattern)opt.GetCurrentPattern(TogglePattern.Pattern);
+            Log("선택지 찾음: " + opt.Current.Name + " / 상태 " + tp.Current.ToggleState);
+            if (tp.Current.ToggleState != ToggleState.On && !ClickOn(opt, hwnd))
+                return "선택지 자리가 가려져 있어 누르지 않았어요";
+            Log("클릭 보냄");
+            if (!WaitFor(() => tp.Current.ToggleState == ToggleState.On, 4000))
+                return "선택이 확인되지 않아 제출하지 않았어요";
+            if (isOther)
+            {
+                AutomationElement box = null;
+                WaitFor(() => (box = ByName(w, "기타 옵션", ControlType.Edit)) != null, 3000);
+                object vpo;
+                if (box == null || !box.TryGetCurrentPattern(ValuePattern.Pattern, out vpo))
+                    return "기타 입력칸을 찾지 못해 제출하지 않았어요";
+                var vp = (ValuePattern)vpo;
+                vp.SetValue(other);
+                string head = other.Trim();
+                head = head.Substring(0, Math.Min(10, head.Length));
+                if (!WaitFor(() => (vp.Current.Value ?? "").Contains(head), 3000))
+                    return "기타 입력칸에 글을 넣지 못해 제출하지 않았어요";
+            }
+            var submit = ByName(w, "제출", ControlType.Button) ?? ByName(w, "Submit", ControlType.Button);
+            if (submit == null || !submit.Current.IsEnabled || !ClickOn(submit, hwnd)) return "제출 버튼을 누르지 못했어요";
+            Log("제출 클릭 보냄");
+            // 제출되면 카드(선택지 버튼)가 사라진다
+            if (!WaitFor(() => ByName(w, "제출", ControlType.Button) == null, 6000))
+                return "제출이 확인되지 않았어요. Claude 앱에서 확인해 주세요";
+            return "ok";
+        });
     }
 
     static long Hwnd(List<AutomationElement> wins)
@@ -253,6 +387,7 @@ class ChatGptWatch
     {
         Console.OutputEncoding = new UTF8Encoding(false);
         Console.InputEncoding = new UTF8Encoding(false);
+        SetProcessDPIAware();     // 화면 읽기 좌표와 클릭 좌표를 같은 실제 픽셀로 맞춘다
         int parent = args.Length > 0 ? int.Parse(args[0]) : -1;
 
         var reader = new Thread(() =>
@@ -290,6 +425,20 @@ class ChatGptWatch
                     var parts = cmd.Split('\t');
                     string r;
                     try { r = Reply(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))); }
+                    catch (Exception ex) { r = "보내는 중 오류: " + ex.Message; }
+                    Console.Out.WriteLine("{\"reply\":" + Json(r) + "}");
+                    Console.Out.Flush();
+                }
+                if (cmd != null && cmd.StartsWith("cardclaude\t"))
+                {
+                    // cardclaude<TAB>세션 제목<TAB>선택지(base64)<TAB>기타 글(base64) → {"reply":"ok"|이유}
+                    var parts = cmd.Split('\t');
+                    string r;
+                    try
+                    {
+                        Func<string, string> dec = x => Encoding.UTF8.GetString(Convert.FromBase64String(x));
+                        r = Card(parts[1], dec(parts[2]), parts.Length > 3 ? dec(parts[3]) : "");
+                    }
                     catch (Exception ex) { r = "보내는 중 오류: " + ex.Message; }
                     Console.Out.WriteLine("{\"reply\":" + Json(r) + "}");
                     Console.Out.Flush();
