@@ -87,14 +87,16 @@ class ChatGptWatch
 
     class Shown { public IntPtr Hwnd, Above; public bool Ghost, Iconic, Layered; public int ExStyle; public uint Key, Flags; public byte Alpha; }
 
-    // Claude 창이 맨 앞(사용자가 보고 있음)이면 그대로 둔다.
-    // 아니면 가려졌거나 최소화돼 앱이 쉬고 있으므로, 거의 투명(알파 1)하고 클릭이 통과하는 상태로
+    // 창이 화면에 보이면(맨 앞이든 나란히 띄워 둔 것이든) 그대로 둔다.
+    // 최소화됐거나 거의 가려졌으면 앱이 쉬고 있으므로, 거의 투명(알파 1)하고 클릭이 통과하는 상태로
     // 포커스 없이 맨 위에 올린다 → 눈에는 안 보이고 쓰던 창의 클릭도 그대로 아래 창으로 간다.
     // 되살린 직후 1~2초 동안 보낸 신호는 버려지므로, 받는 쪽에서 반영될 때까지 다시 보낸다.
     static Shown Wake(IntPtr hwnd)
     {
         var s = new Shown { Hwnd = hwnd, Iconic = IsIconic(hwnd) };
-        if (!s.Iconic && GetForegroundWindow() == hwnd) return s;
+        // 화면에 보이는 창(맨 앞이 아니어도)은 앱이 깨어 있어 신호를 받으므로 그대로 둔다
+        // (투명하게 바꾸면 보던 창이 잠깐 사라졌다 돌아오는 것처럼 보임)
+        if (!s.Iconic && (GetForegroundWindow() == hwnd || OnScreen(hwnd))) return s;
         s.Ghost = true;
         // 원래 바로 위에 있던 보통 창(맨 위 고정 창 제외)을 기억해 두었다가 그 아래로 돌려놓는다
         for (IntPtr x = GetWindow(hwnd, 3); x != IntPtr.Zero; x = GetWindow(x, 3))      // GW_HWNDPREV
@@ -380,8 +382,136 @@ class ChatGptWatch
         return false;
     }
 
+    // ---- 이미지 진짜 첨부 ----
+    // 붙여넣기(Ctrl+V)는 키보드 포커스가 있는 창에서만 처리되므로, 그 동안만 창에 포커스를 주고(창은 투명이라 안 보임)
+    // 클립보드에 이미지를 올려 붙여넣은 뒤, 포커스는 사용자가 쓰던 창으로, 클립보드는 원래 내용으로 돌려놓는다.
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+
+    static bool ToFront(IntPtr h)
+    {
+        if (h == IntPtr.Zero || !IsWindow(h)) return false;
+        if (GetForegroundWindow() == h) return true;
+        uint pid;
+        uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out pid), me = GetCurrentThreadId();
+        bool attached = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
+        SetForegroundWindow(h);
+        if (attached) AttachThreadInput(me, fgThread, false);
+        return WaitFor(() => GetForegroundWindow() == h, 1000);
+    }
+
+    // 클립보드는 STA 스레드에서만 다룰 수 있다
+    static void Sta(Action a)
+    {
+        var th = new Thread(() => { try { a(); } catch (Exception ex) { Log("클립보드 오류: " + ex.Message); } });
+        th.SetApartmentState(ApartmentState.STA);
+        th.Start();
+        th.Join();
+    }
+
+    class Clip { public string Text; public System.Drawing.Image Img; public System.Collections.Specialized.StringCollection Files; }
+
+    static Clip SaveClip()
+    {
+        var c = new Clip();
+        Sta(() =>
+        {
+            if (System.Windows.Forms.Clipboard.ContainsText()) c.Text = System.Windows.Forms.Clipboard.GetText();
+            if (System.Windows.Forms.Clipboard.ContainsImage()) c.Img = System.Windows.Forms.Clipboard.GetImage();
+            if (System.Windows.Forms.Clipboard.ContainsFileDropList()) c.Files = System.Windows.Forms.Clipboard.GetFileDropList();
+        });
+        return c;
+    }
+
+    static void RestoreClip(Clip c)
+    {
+        Sta(() =>
+        {
+            var d = new System.Windows.Forms.DataObject();
+            if (c.Text != null) d.SetText(c.Text);
+            if (c.Img != null) d.SetImage(c.Img);
+            if (c.Files != null) d.SetFileDropList(c.Files);
+            if (c.Text == null && c.Img == null && c.Files == null) System.Windows.Forms.Clipboard.Clear();
+            else System.Windows.Forms.Clipboard.SetDataObject(d, true);
+        });
+    }
+
+    static bool ClipImage(string path)
+    {
+        bool ok = false;
+        Sta(() =>
+        {
+            using (var img = System.Drawing.Image.FromFile(path))
+            {
+                var d = new System.Windows.Forms.DataObject();
+                d.SetImage(new System.Drawing.Bitmap(img));
+                var ms = new System.IO.MemoryStream();            // 크롬 계열 앱은 PNG 형식을 먼저 읽는다
+                img.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                d.SetData("PNG", false, ms);
+                System.Windows.Forms.Clipboard.SetDataObject(d, true);
+                ok = true;
+            }
+        });
+        return ok;
+    }
+
+    static HashSet<string> ButtonNames(AutomationElement scope)
+    {
+        var names = new HashSet<string>();
+        foreach (AutomationElement b in scope.FindAll(TreeScope.Descendants, Condition.TrueCondition))
+            try
+            {
+                var ct = b.Current.ControlType;
+                if (ct == ControlType.Button || ct == ControlType.Image)
+                    names.Add(ct.ProgrammaticName + ":" + (b.Current.Name ?? ""));
+            }
+            catch { }
+        return names;
+    }
+
+    // 입력창에 이미지를 붙여넣는다. 실패하면 이유, 성공하면 null
+    static string PasteImages(AutomationElement scope, IntPtr hwnd, AutomationElement input, List<string> images, IntPtr restore)
+    {
+        if (images.Count == 0) return null;
+        var before = ButtonNames(scope);
+        var clip = SaveClip();
+        if (restore == IntPtr.Zero) restore = GetForegroundWindow();
+        try
+        {
+            if (!ToFront(hwnd)) return "이미지를 붙이려고 창에 포커스를 주지 못했어요";
+            Log("포커스 받음");
+            ClickOn(input, hwnd);
+            Thread.Sleep(250);
+            foreach (var path in images)
+            {
+                if (!ClipImage(path)) return "이미지 파일을 열지 못했어요: " + path;
+                Thread.Sleep(120);
+                keybd_event(0x11, 0, 0, UIntPtr.Zero);            // Ctrl
+                keybd_event(0x56, 0, 0, UIntPtr.Zero);            // V
+                keybd_event(0x56, 0, 2, UIntPtr.Zero);
+                keybd_event(0x11, 0, 2, UIntPtr.Zero);
+                Thread.Sleep(800);                                // 앱이 클립보드를 읽어 갈 시간
+                Log("이미지 붙여넣음: " + path);
+            }
+        }
+        finally
+        {
+            Log("포커스 돌려놓음: " + ToFront(restore));
+            RestoreClip(clip);
+            Log("클립보드 돌려놓음");
+        }
+        // 첨부되면 입력창 둘레에 새 버튼(지우기 등)이나 그림이 생긴다
+        var added = ButtonNames(scope).Where(n => !before.Contains(n)).ToList();
+        Log("새로 생긴 것: " + string.Join(" | ", added));
+        return added.Count > 0 ? null : "이미지가 입력창에 붙지 않았어요";
+    }
+
     // 입력창(다음 단계 상자 답)에 글을 넣고 '보내기'
-    static string Reply(string title, string text)
+    static string Reply(string title, string text, List<string> images = null, IntPtr restore = default(IntPtr))
     {
         return InSession(title, w =>
         {
@@ -391,6 +521,8 @@ class ChatGptWatch
             var vp = (ValuePattern)vpo;
             if ((vp.Current.Value ?? "").Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
             var hwnd = new IntPtr(w.Current.NativeWindowHandle);
+            string pasted = PasteImages(w, hwnd, ed, images ?? new List<string>(), restore);
+            if (pasted != null) return pasted;
             string head = text.Trim();
             head = head.Substring(0, Math.Min(10, head.Length));
             // 입력창을 클릭 신호로 고르고 글자를 신호로 넣는다 (화면 읽기로 넣으면 앱이 창을 앞으로 가져옴)
@@ -539,7 +671,7 @@ class ChatGptWatch
         return v.EndsWith("…") && v.Length < 80 && v.IndexOf('\n') < 0 ? "" : v;
     }
 
-    static string ReplyVsCode(string title, string text)
+    static string ReplyVsCode(string title, string text, List<string> images = null, IntPtr restore = default(IntPtr))
     {
         return InVsCode(title, (p, hwnd) =>
         {
@@ -549,6 +681,8 @@ class ChatGptWatch
             var vp = (ValuePattern)vpo;
             Log("입력창 값: [" + (vp.Current.Value ?? "") + "]");
             if (VsText(vp).Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
+            string pasted = PasteImages(p, hwnd, ed, images ?? new List<string>(), restore);
+            if (pasted != null) return pasted;
             string head = text.Trim();
             head = head.Substring(0, Math.Min(10, head.Length));
             if (!ClickOn(ed, hwnd)) return "입력창 자리를 찾지 못했어요";
@@ -563,11 +697,22 @@ class ChatGptWatch
             Log("입력창에 글 넣음");
             for (int k = 0; k < 3; k++)
             {
-                // 답하는 중엔 이 버튼이 Stop 이라 누르면 멈춰 버린다 → Stop 이 아닐 때만
+                // 답하는 중엔 이 버튼이 Stop 이라 누르면 멈춰 버린다 → Stop 이 아닐 때만 누르고,
+                // 계속 Stop 이면 Enter 신호로 보낸다 (답하는 중이면 VS Code가 대기열에 넣음)
                 AutomationElement send = null;
                 WaitFor(() => (send = ByClass(p, "sendButton", ControlType.Button)) != null
-                              && send.Current.IsEnabled && send.Current.Name != "Stop", 3000);
-                if (send == null || !send.Current.IsEnabled || send.Current.Name == "Stop" || !ClickOn(send, hwnd)) break;
+                              && send.Current.IsEnabled && send.Current.Name != "Stop", 1500);
+                if (send != null && send.Current.IsEnabled && send.Current.Name != "Stop")
+                {
+                    if (!ClickOn(send, hwnd)) break;
+                }
+                else
+                {
+                    Log("보내기 버튼이 Stop → Enter 신호");
+                    PostMessage(hwnd, 0x0100, new IntPtr(0x0D), new IntPtr(0x001C0001));            // WM_KEYDOWN Enter
+                    PostMessage(hwnd, 0x0102, new IntPtr(0x0D), new IntPtr(0x001C0001));            // WM_CHAR
+                    PostMessage(hwnd, 0x0101, new IntPtr(0x0D), new IntPtr(unchecked((int)0xC01C0001)));
+                }
                 if (WaitFor(() => !(vp.Current.Value ?? "").Contains(head), 2000)) { Log("보냄"); return "ok"; }
             }
             Erase(hwnd, VsText(vp).Length + 2);
@@ -642,6 +787,18 @@ class ChatGptWatch
         });
     }
 
+    // 답장 명령 뒤쪽 칸: [3] 이미지 경로들(base64, 줄바꿈 구분) [4] 끝나고 포커스를 돌려놓을 창
+    static void ReplyExtras(string[] parts, out List<string> images, out IntPtr restore)
+    {
+        images = new List<string>();
+        restore = IntPtr.Zero;
+        if (parts.Length > 3 && parts[3].Length > 0)
+            images = Encoding.UTF8.GetString(Convert.FromBase64String(parts[3]))
+                .Split('\n').Where(x => x.Trim().Length > 0).ToList();
+        long h;
+        if (parts.Length > 4 && long.TryParse(parts[4], out h)) restore = new IntPtr(h);
+    }
+
     static long Hwnd(List<AutomationElement> wins)
     {
         foreach (var w in wins)
@@ -687,10 +844,16 @@ class ChatGptWatch
                 if (cmd != null && cmd.StartsWith("openclaude\t")) Open("claude", IsClaudeRow, cmd.Substring(11));
                 if (cmd != null && cmd.StartsWith("replyclaude\t"))
                 {
-                    // replyclaude<TAB>세션 제목<TAB>보낼 글(base64, UTF-8) → {"reply":"ok"} 또는 {"reply":"이유"}
+                    // replyclaude<TAB>세션 제목<TAB>보낼 글(base64, UTF-8)[<TAB>이미지 경로들(base64, 줄바꿈으로 구분)<TAB>돌려놓을 창]
+                    // → {"reply":"ok"} 또는 {"reply":"이유"}
                     var parts = cmd.Split('\t');
                     string r;
-                    try { r = Reply(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))); }
+                    try
+                    {
+                        List<string> imgs; IntPtr back;
+                        ReplyExtras(parts, out imgs, out back);
+                        r = Reply(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2])), imgs, back);
+                    }
                     catch (Exception ex) { r = "보내는 중 오류: " + ex.Message; }
                     Console.Out.WriteLine("{\"reply\":" + Json(r) + "}");
                     Console.Out.Flush();
@@ -703,7 +866,9 @@ class ChatGptWatch
                     try
                     {
                         Func<string, string> dec = x => Encoding.UTF8.GetString(Convert.FromBase64String(x));
-                        r = parts[0] == "replyvscode" ? ReplyVsCode(parts[1], dec(parts[2]))
+                        List<string> imgs; IntPtr back;
+                        ReplyExtras(parts, out imgs, out back);
+                        r = parts[0] == "replyvscode" ? ReplyVsCode(parts[1], dec(parts[2]), imgs, back)
                             : CardVsCode(parts[1], dec(parts[2]), parts.Length > 3 ? dec(parts[3]) : "");
                     }
                     catch (Exception ex) { r = "보내는 중 오류: " + ex.Message; }

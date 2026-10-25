@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import urllib.request
 import wave
 import winreg
@@ -33,7 +34,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.5.1"
+VERSION = "1.5.5"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -67,6 +68,10 @@ NO_WINDOW = 0x08000000
 KO = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0xFF == 0x12
 T = {
     "working": ("{d} 진행 중", "working {d}"),
+    "working_short": ("진행 {d}", "working {d}"),
+    "waiting_short": ("응답 대기 {d}", "waiting {d}"),
+    "bg_short": ("백그라운드 {n}개", "{n} in background"),
+    "done_short": ("완료 · {d} 전", "done · {d} ago"),
     "waiting": ("응답 대기 {d}째", "waiting for you {d}"),
     "bg": ("백그라운드 {n}개 기다리는 중 · {d}", "{n} background task(s) · {d}"),
     "done": ("완료 {w} · {d}", "done {w} · {d}"),
@@ -89,10 +94,12 @@ T = {
     "hide_viewed": ("화면에 보이는 세션은 알리지 않기", "Don't notify for sessions on screen"),
     "answer_preview": ("끝난 답변 미리보기", "Show finished answers"),
     "ext_menu": ("브라우저 확장 설치 (웹 스토어)", "Install browser extension (Web Store)"),
-    "reply_other": ("기타", "Other"),
-    "reply_write": ("답장", "Reply"),
-    "answer_less": ("▴ 접기", "▴ less"),
-    "reply_send": ("보내기", "Send"),
+    "back": ("목록", "list"),
+    "answer_in_app": ("여러 문항 질문이라 앱에서 답해 주세요", "Multi-question card: answer it in the app"),
+    "img_hint": ("누르면 빼기", "click to remove"),
+    "img_pick": ("이미지", "Images"),
+    "img_default": ("이 이미지를 봐 주세요.", "Please look at this image."),
+    "reply_send": ("➤", "➤"),
     "reply_sending": ("보내는 중…", "sending…"),
     "reply_fail": ("답을 보내지 못했습니다.\n{e}", "Could not send the answer.\n{e}"),
     "reply_nohelper": ("감시 프로그램이 꺼져 있어요", "The helper is not running"),
@@ -134,11 +141,15 @@ def S(v):
 
 # ---- 색 ----
 KEY = "#0b0c0d"      # 이 색이 투명해짐
-INNER = "#221c28"
-HOVER = "#3a3042"    # 마우스를 올린 줄
-BORDER = "#f5942b"
-FG = "#e8e8ec"
-SUB = "#9a9aa6"
+# 말풍선: 로봇과 같은 결의 옅은 주황 바탕 + 로봇 주황 테두리 + 진한 갈색 글자
+INNER = "#fff1e1"
+HOVER = "#d9700f"    # 마우스를 올린 줄의 제목 글자 (진한 주황)
+BORDER = "#f39a3f"
+LINE = "#f6d6b4"     # 줄 사이 구분선
+FG = "#43260f"
+SUB = "#9a6b45"
+TXT_RED = "#d63a2f"  # 밝은 바탕 위 '응답 대기' 글자
+ICON_INK = "#3a2e26"  # 밝은 바탕 위 흑백 아이콘(GPT·Grok) 색
 ACCENT = "#f5942b"
 GREEN = "#4cc46a"
 RED = "#ff6b6b"
@@ -146,15 +157,25 @@ BLUE = "#4ea1ff"
 PURPLE = "#a98bff"
 SILVER = "#cfd3dc"
 TEAL = "#3dd6c6"
-# 말풍선 안 답변·버튼: 바탕(어두운 보라)보다 한 단계 밝은 보라 면에 글자를 밝게, 강조는 로봇 주황
-ANS_BG = "#352c40"        # 답변 상자
-ANS_FG = "#efe9f5"
-CHIP_BG = "#4a3a52"       # 선택지 버튼: 보라 바탕 + 부드러운 주황 글자
-CHIP_FG = "#ffc285"
-CHIP_SUB_BG = "#3a3045"   # 기타·답장: 차분한 보라 + 연보라 글자
-CHIP_SUB_FG = "#d9d0e4"
-ENTRY_BG = "#3a3046"      # 입력칸: 보라 바탕 + 밝은 글자, 테두리는 주황
-ENTRY_FG = "#f3eef8"
+# 말풍선 안 답변·버튼: 바탕보다 한 단계 밝은 파랑 면에 흰 글자
+ANS_BG = "#fffaf3"        # 답변 칸: 거의 흰색에 주황을 살짝 섞음
+ANS_FG = "#1e1e1e"        # 답변 글자: 검은색
+ANS_HEAD = "#000000"
+CHIP_BG = "#f39a3f"       # 선택지 버튼: 로봇 주황 + 흰 글자
+CHIP_FG = "#ffffff"
+CHIP_HOVER = "#e0801f"    # 버튼에 마우스를 올리면 조금 진한 주황
+CHIP_SUB_BG = "#fbd3a8"   # 이미지·보내기: 연한 주황 + 갈색 글자
+CHIP_SUB_FG = "#6b3f17"
+ENTRY_BG = "#ffffff"      # 입력칸: 흰 바탕 + 진한 글자, 테두리는 연한 주황
+ENTRY_FG = "#3b200b"
+ENTRY_LINE = "#f0b27a"
+WORKING = "#c8640f"       # '진행 중' 글자
+# 어느 AI인지 보이는 알약 모양 이름표 (바탕, 글자)
+PILL = {"claude": ("#fbcf9f", "#8a4310"), "claudeweb": ("#fbcf9f", "#8a4310"),
+        "claudechat": ("#fbcf9f", "#8a4310"), "chatgpt": ("#c6eee4", "#0d6b5c"),
+        "chatweb": ("#c6eee4", "#0d6b5c"), "codex": ("#d6e2ff", "#2851b8"),
+        "gemini": ("#e6dcff", "#5a3aa8"), "grok": ("#e4e7ee", "#4a5163"),
+        "kimi": ("#cdf3ef", "#0e6b63"), "update": ("#d4f2dc", "#1f7a3d"), "tip": ("#d4f2dc", "#1f7a3d")}
 # Claude 주황, GPT 쪽 파랑, Gemini 보라, Grok 은색, Kimi 청록
 SRC_COLOR = {"claude": ACCENT, "claudeweb": ACCENT, "claudechat": ACCENT, "codex": BLUE, "chatgpt": BLUE,
              "chatweb": BLUE, "gemini": PURPLE, "grok": SILVER, "kimi": TEAL, "update": GREEN, "tip": GREEN}
@@ -180,7 +201,7 @@ def brand_icon(kind, size):
             ring = Image.new("RGBA", (n, n), (0, 0, 0, 0))
             ImageDraw.Draw(ring).rounded_rectangle(
                 [n * 0.31, n * 0.05, n * 0.69, n * 0.95], radius=n * 0.19,
-                outline="#e8e8ec", width=max(2, int(n * 0.09)))
+                outline=ICON_INK, width=max(2, int(n * 0.09)))
             img.alpha_composite(ring.rotate(60 * i, resample=Image.BICUBIC, center=(c, c)))
     elif kind == "gemini":                 # 파랑→보라 네 갈래 반짝이 별
         pts = []
@@ -198,8 +219,8 @@ def brand_icon(kind, size):
         img.paste(grad, (0, 0), mask)
     elif kind == "grok":                   # 원을 가르는 사선
         w = max(2, int(n * 0.1))
-        d.arc([n * 0.08, n * 0.08, n * 0.92, n * 0.92], start=150, end=330, fill="#e8e8ec", width=w)
-        d.line([(n * 0.22, n * 0.9), (n * 0.9, n * 0.1)], fill="#e8e8ec", width=w)
+        d.arc([n * 0.08, n * 0.08, n * 0.92, n * 0.92], start=150, end=330, fill=ICON_INK, width=w)
+        d.line([(n * 0.22, n * 0.9), (n * 0.9, n * 0.1)], fill=ICON_INK, width=w)
     elif kind == "kimi":                   # 흰 상자에 K, 파란 점
         d.rounded_rectangle([n * 0.04, n * 0.04, n * 0.96, n * 0.96], radius=n * 0.24, fill="#e8e8ec")
         try:
@@ -252,11 +273,81 @@ IDLE = [
     "....DD...DD....",
     "....DD...DD....",
 ]
-BLINK = IDLE[:6] + [".DOFFFFFFFFFOD."] + IDLE[7:]
-WORK_A = IDLE[:11] + ["..ODOOOOOOOD...", "...DOOOOOOODO.."] + IDLE[13:]
-WORK_B = IDLE[:11] + ["...DOOOOOOODO..", "..ODOOOOOOOD..."] + IDLE[13:]
-PALETTE = {"O": "#f5942b", "D": "#a85a0e", "F": "#2a2230", "M": "#ffb15e"}
-EYE = {"idle": "#ffffff", "work": "#ffd84d", "happy": "#76ff9e", "alert": RED}
+# (위 도트 그림은 아이콘·스토어 그림을 만드는 도구들이 쓴다. 화면의 로봇은 아래 robot_image 로 매끈하게 그림)
+
+# ---- 화면 로봇: 4배로 크게 그린 뒤 줄여서 매끈하게 ----
+BOT_O = "#f7952c"        # 몸 주황
+BOT_O2 = "#e27f1d"       # 귀·발 (조금 진한 주황)
+BOT_LINE = "#9c4a0c"     # 테두리
+BOT_FACE = "#ffc78f"     # 얼굴판·배 (연한 주황)
+BOT_EYE = "#3b2416"      # LED 눈 (둥근 사각형)
+# 상태 색: 안테나 공과 가슴 체크 마크
+BOT_STATE = {"idle": "#ffc98a", "work": "#ffd84d", "happy": "#6fe39a", "alert": "#ff5c5c"}
+
+
+def robot_image(mode, w, h, blink=False, arm_up=0, hard=True):
+    """귀여운 주황 로봇 (RGBA). mode: idle·work·happy·alert, arm_up: 0 내림 / 1 왼팔 / 2 오른팔 (일할 때 번갈아).
+    hard: 가장자리를 딱 끊기 (화면 로봇용). 아이콘처럼 진짜 투명 배경이면 False 로 부드럽게."""
+    k = 4
+    W, H = w * k, h * k
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    sx, sy = W / 150, H / 160                       # 150 x 160 칸 기준으로 그린다
+
+    def box(x0, y0, x1, y1):
+        return [x0 * sx, y0 * sy, x1 * sx, y1 * sy]
+    lw = max(1, int(4 * sx))
+    state = BOT_STATE.get(mode, BOT_STATE["idle"])
+
+    # 안테나
+    d.line([75 * sx, 10 * sy, 75 * sx, 26 * sy], fill=BOT_LINE, width=lw + int(2 * sx))
+    d.ellipse(box(65, 1, 85, 21), fill=state, outline=BOT_LINE, width=lw)
+    d.ellipse(box(70, 5, 76, 11), fill="#ffffff")
+    # 팔 (몸 뒤)
+    for side, x0 in ((1, 24), (2, 110)):
+        up = arm_up == side
+        d.rounded_rectangle(box(x0, 92 if up else 102, x0 + 16, 120 if up else 130),
+                            radius=8 * sx, fill=BOT_O, outline=BOT_LINE, width=lw)
+    # 발
+    d.rounded_rectangle(box(44, 136, 70, 154), radius=7 * sx, fill=BOT_O2, outline=BOT_LINE, width=lw)
+    d.rounded_rectangle(box(80, 136, 106, 154), radius=7 * sx, fill=BOT_O2, outline=BOT_LINE, width=lw)
+    # 몸통·배
+    d.rounded_rectangle(box(38, 96, 112, 142), radius=18 * sx, fill=BOT_O, outline=BOT_LINE, width=lw)
+    d.rounded_rectangle(box(55, 104, 95, 132), radius=10 * sx, fill=BOT_FACE)
+    # 가슴: 할 일(Task)을 끝내 주는 로봇이라 체크 마크 (상태 색 동그라미 위)
+    d.ellipse(box(64, 107, 86, 129), fill=state, outline=BOT_LINE, width=max(1, lw // 2))
+    d.line([(68.5 * sx, 118 * sy), (73.5 * sx, 123 * sy), (81.5 * sx, 112.5 * sy)],
+           fill=BOT_LINE, width=lw, joint="curve")
+    # 귀
+    d.rounded_rectangle(box(4, 48, 18, 74), radius=6 * sx, fill=BOT_O2, outline=BOT_LINE, width=lw)
+    d.rounded_rectangle(box(132, 48, 146, 74), radius=6 * sx, fill=BOT_O2, outline=BOT_LINE, width=lw)
+    # 머리·얼굴판
+    d.rounded_rectangle(box(13, 24, 137, 98), radius=32 * sx, fill=BOT_O, outline=BOT_LINE, width=lw)
+    d.rounded_rectangle(box(27, 36, 123, 88), radius=24 * sx, fill=BOT_FACE)
+    d.rounded_rectangle(box(30, 28, 70, 34), radius=3 * sx, fill="#ffb867")   # 머리 윗부분 반짝
+    # 눈
+    for ex in (55, 95):
+        if mode == "happy":                         # ^ ^
+            d.arc(box(ex - 10, 52, ex + 10, 70), 200, 340, fill=BOT_EYE, width=lw + int(sx))
+        elif blink:
+            d.rounded_rectangle(box(ex - 9, 59, ex + 9, 64), radius=2 * sx, fill=BOT_EYE)
+        else:                                       # 로봇다운 둥근 사각형 LED 눈
+            big = 2 if mode == "alert" else 0
+            d.rounded_rectangle(box(ex - 8 - big, 50 - big, ex + 8 + big, 70 + big),
+                                radius=5 * sx, fill=BOT_EYE)
+            d.rounded_rectangle(box(ex - 5, 53, ex - 1, 58), radius=1.5 * sx, fill="#ffffff")   # 반짝
+    # 입
+    if mode == "alert":
+        d.ellipse(box(70, 72, 80, 82), fill=BOT_EYE)
+    elif mode == "happy":
+        d.chord(box(64, 68, 86, 84), 0, 180, fill=BOT_EYE)
+    else:
+        d.arc(box(66, 66, 84, 80), 20, 160, fill=BOT_EYE, width=lw)
+    small = img.resize((w, h), Image.LANCZOS)
+    if hard:
+        # 투명색 화면 위라 가장자리를 반투명으로 두면 검은 테가 생긴다 → 반 이상 칠해진 점만 남긴다
+        small.putalpha(small.getchannel("A").point(lambda v: 255 if v >= 110 else 0))
+    return small
 
 
 def fmt_dur(sec):
@@ -272,6 +363,40 @@ def fmt_dur(sec):
     if sec < 3600:
         return f"{sec // 60}m {sec % 60}s"
     return f"{sec // 3600}h {sec % 3600 // 60}m"
+
+
+def fmt_short(sec):
+    """목록용 짧은 시간: 35초 / 3분 / 2시간."""
+    sec = max(0, int(sec))
+    if KO:
+        return f"{sec}초" if sec < 60 else f"{sec // 60}분" if sec < 3600 else f"{sec // 3600}시간"
+    return f"{sec}s" if sec < 60 else f"{sec // 60}m" if sec < 3600 else f"{sec // 3600}h"
+
+
+def answer_lines(text):
+    """답변(마크다운)을 (종류, 글) 줄 목록으로: h 소제목 / li 목록 / gap 빈 줄 다음 문단 / p 보통.
+    굵게(**)·코드(`) 표시와 표의 세로줄은 걷어 낸다."""
+    out, gap = [], False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            gap = True
+            continue
+        if set(s) <= set("|-: "):                 # 표 구분선
+            continue
+        s = s.replace("**", "").replace("`", "")
+        if s.startswith("|"):
+            s = " · ".join(c.strip() for c in s.strip("|").split("|") if c.strip())
+        if s.startswith("#"):
+            out.append(("h", s.lstrip("#").strip()))
+        elif s[:2] in ("- ", "* ", "• "):
+            out.append(("li", "• " + s[2:].strip()))
+        elif len(s) > 2 and s[0].isdigit() and s[1:3] in (". ", ") "):
+            out.append(("li", s))
+        else:
+            out.append(("gap" if gap and out else "p", s))
+        gap = False
+    return out
 
 
 def work_area():
@@ -337,6 +462,28 @@ def play(name):
                            | winsound.SND_NODEFAULT)
     except Exception:
         pass
+
+
+IMG_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+
+
+def image_dir():
+    """답장에 붙인 이미지를 두는 곳: 사진\\TaskPet (Claude 앱 안의 Claude Code도 읽을 수 있는 곳 —
+    %LOCALAPPDATA% 는 앱 가상화로 다르게 보일 수 있어 피한다)."""
+    base = os.path.join(HOME, "Pictures")
+    try:
+        import uuid
+        guid = (ctypes.c_byte * 16).from_buffer_copy(
+            uuid.UUID("33E28130-4E1E-4676-835A-98395C3BC3BB").bytes_le)   # FOLDERID_Pictures
+        buf = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(buf)) == 0:
+            base = buf.value
+            ctypes.windll.ole32.CoTaskMemFree(buf)
+    except Exception:
+        pass
+    path = os.path.join(base, APP)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def read_json(path, default):
@@ -658,8 +805,9 @@ class ChatGptWatcher:
                 self.report = obj
                 self.fresh = True
 
-    def reply(self, title, text, vscode=False):
-        """Claude 앱의 그 Code 세션에 글을 넣어 보낸다 (창은 앞으로 가져오지 않음). 결과는 take_reply()."""
+    def reply(self, title, text, vscode=False, images=(), restore=0):
+        """Claude 앱(또는 VS Code)의 그 세션에 글을 넣어 보낸다 (창은 앞으로 가져오지 않음). 결과는 take_reply().
+        images 가 있으면 감시 프로그램이 잠깐 포커스를 받아 진짜로 붙여넣고, 포커스는 restore 창으로 돌려놓는다."""
         self.reply_result = None
         if not (self.proc and self.proc.poll() is None):
             self.reply_result = t("reply_nohelper")
@@ -667,7 +815,10 @@ class ChatGptWatcher:
         b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
         try:
             cmd = "replyvscode" if vscode else "replyclaude"
-            self.proc.stdin.write(f"{cmd}\t{title}\t{b64}\n".encode("utf-8"))
+            imgs = base64.b64encode("\n".join(images).encode("utf-8")).decode("ascii")
+            # 감시 프로그램이 창에 포커스를 줄 수 있게 허락 (지금은 로봇을 막 누른 참이라 로봇이 맨 앞)
+            ctypes.windll.user32.AllowSetForegroundWindow(self.proc.pid)
+            self.proc.stdin.write(f"{cmd}\t{title}\t{b64}\t{imgs}\t{int(restore or 0)}\n".encode("utf-8"))
             self.proc.stdin.flush()
         except OSError:
             self.reply_result = t("reply_nohelper")
@@ -983,8 +1134,7 @@ def claude_last_answer(transcript):
             elif rec["type"] == "assistant" and kind == "text":
                 texts.append(str(part.get("text") or ""))
     answer = "\n\n".join(x.strip() for x in texts if x.strip())
-    answer = re.sub(r"\*\*|`", "", answer)            # 굵게·코드 표시는 빼고 글만
-    answer = re.sub(r"(?m)^#+\s*", "", answer)
+    # 원래 글 그대로 둔다 (보여 줄 때 answer_lines 로 소제목·목록을 다듬음)
     return answer.strip()[:4000], entry, ai_title.strip()[:60]
 
 
@@ -1430,9 +1580,8 @@ class Tracker:
     def refresh_claude_titles(self):
         self.drop_deleted()
         for key, e in self.tasks.items():
-            # 답변을 아직 안 꺼내 둔 끝난 줄(로봇을 다시 켰을 때 등)은 한 번 꺼내 둔다
-            if (e.get("src") == "claude" and e.get("status") in ("done", "waiting")
-                    and "answer" not in e and e.get("transcript")):
+            # 답변·세션을 연 곳을 아직 안 꺼내 둔 줄(새로 시작한 줄, 로봇을 다시 켰을 때 등)은 한 번 꺼내 둔다
+            if e.get("src") == "claude" and "entry" not in e and e.get("transcript"):
                 self.note_answer(e, e["transcript"])
                 self.dirty = True
             # '백그라운드 기다리는 중'이 실제로는 끝나 있고 질문으로 멈춘 상태면 바로잡는다
@@ -1637,8 +1786,12 @@ class Pet:
         self._pos_sig = None
         self._infos = []
         self._icons = {}
-        self.reply_open = None        # '기타'로 입력칸을 연 줄
-        self.answer_open = None       # 답변을 펼쳐 둔 줄
+        self._bot = {}                # 로봇 그림 (표정·팔 모양별로 한 번만 그림)
+        self._rounds = {}             # 둥근 바탕 그림 (크기·색별로 한 번만 그림)
+        self._picking = False         # 📎 파일 고르는 창이 떠 있는 동안
+        self.detail = None            # › 로 펼친 상세 카드의 줄 (없으면 목록)
+        self.reply_imgs = []          # 답장에 붙인 이미지 파일들
+        self.prev_fg = 0              # 로봇 입력칸을 열기 전에 쓰던 창
         self.reply_key = None         # 답을 보내는 중인 줄
         self.reply_var = tk.StringVar(self.root)
         # 화면에 보이는 앱("claude"·"code"·"chatgpt")들, Claude 앱에 띄워 둔 세션 제목, ChatGPT 앱에 띄워 둔 대화 제목
@@ -1765,7 +1918,7 @@ class Pet:
             self.update_bubble(force=True)
         self._known_keys = keys
         sec = self.settings.get("autohide", 0)
-        if not sec or self.hidden or self.reply_open or self.answer_open:
+        if not sec or self.hidden or self.detail:
             return
         if any(e.get("sending") for e in self.tracker.tasks.values()):
             return
@@ -1915,22 +2068,17 @@ class Pet:
         c = self.canvas
         c.delete("all")
         mode = self.mode()
-        if mode == "work":
-            grid = WORK_A if self.tick_n % 2 == 0 else WORK_B
-        elif mode == "idle":
-            grid = BLINK if random.random() < 0.12 else IDLE
-        else:
-            grid = IDLE
+        blink = mode == "idle" and random.random() < 0.12
+        arm = (1 if self.tick_n % 2 == 0 else 2) if mode == "work" else 0     # 일할 때 팔을 번갈아
         bounce = -S(2) if (mode != "idle" and self.tick_n % 2 == 0) else 0
-        px = self.px
-        for ry, row in enumerate(grid):
-            for rx, ch in enumerate(row):
-                if ch == ".":
-                    continue
-                color = EYE[mode] if ch == "E" else PALETTE[ch]
-                x = self.pad_x + rx * px
-                y = self.pad_y + ry * px + bounce
-                c.create_rectangle(x, y, x + px, y + px, fill=color, width=0)
+        key = (mode, blink, arm)
+        if key not in self._bot:
+            w, h = 15 * self.px, 16 * self.px
+            im = robot_image(mode, w, h, blink=blink, arm_up=arm)
+            bg = Image.new("RGB", im.size, KEY)              # 투명색 위에 붙여 창에서 빠지게
+            bg.paste(im, mask=im.getchannel("A"))
+            self._bot[key] = ImageTk.PhotoImage(bg)
+        c.create_image(self.pad_x, self.pad_y + bounce, image=self._bot[key], anchor="nw")
 
         st = [e.get("status") for e in self.shown_tasks().values()]
         n = st.count("working")
@@ -1943,221 +2091,391 @@ class Pet:
             # 진행 중인 것이 모두 같은 색이면 그 색, 섞여 있으면 기본 주황
             colors = {SRC_COLOR.get(s, ACCENT) for s in srcs}
             badge = (colors.pop() if len(colors) == 1 else ACCENT, str(n))
-        elif "done" in st:
-            badge = (GREEN, "✓")
-        if badge:
+        # 끝남은 로봇 가슴·안테나 색으로 보이므로 따로 배지를 달지 않는다
+        if badge:                                # 머리 오른쪽 위 모서리에 붙여 단다
             d = S(16)
-            x, y = self.cw - d, S(4)
+            x = self.pad_x + int(15 * self.px * 0.84)
+            y = self.pad_y + int(16 * self.px * 0.10)
             c.create_oval(x, y, x + d, y + d, fill=badge[0], width=0)
             c.create_text(x + d / 2, y + d / 2, text=badge[1], fill="#1b1c20",
                           font=(FONT, 8, "bold"))
 
     # ---- 말풍선 ----
     @staticmethod
-    def info_text(e, now):
-        if e.get("status") == "update":
+    def info_text(e, now, short=False):
+        """줄의 상태 글. short=True 는 목록용 짧은 글 (마우스를 올리면 자세한 글로)."""
+        st = e.get("status")
+        if st == "update":
             phase = e.get("phase")
             body = (t("update_dl", p=e.get("pct", 0)) if phase == "dl" else
                     t("update_run") if phase == "run" else
                     t("update_fail") if phase == "fail" else t("update_ready"))
-        elif e.get("status") == "tip":
+        elif st == "tip":
             body = t("ext_tip_body")
-        elif e.get("status") == "done":
-            when = time.strftime("%H:%M", time.localtime(e.get("end", now)))
-            body = t("done", w=when, d=fmt_dur(e.get("end", now) - e.get("start", now)))
-        elif e.get("status") == "waiting":
-            body = t("waiting", d=fmt_dur(now - e.get("wait_start", now)))
+        elif st == "done":
+            if short:
+                body = t("done_short", d=fmt_short(now - e.get("end", now)))
+            else:
+                when = time.strftime("%H:%M", time.localtime(e.get("end", now)))
+                body = t("done", w=when, d=fmt_dur(e.get("end", now) - e.get("start", now)))
+        elif st == "waiting":
+            d = now - e.get("wait_start", now)
+            body = t("waiting_short", d=fmt_short(d)) if short else t("waiting", d=fmt_dur(d))
         elif e.get("bg"):
-            body = t("bg", n=e["bg"], d=fmt_dur(now - e.get("start", now)))
+            body = (t("bg_short", n=e["bg"]) if short
+                    else t("bg", n=e["bg"], d=fmt_dur(now - e.get("start", now))))
         else:
-            body = t("working", d=fmt_dur(now - e.get("start", now)))
-        return f" · {body}"
+            d = now - e.get("start", now)
+            body = t("working_short", d=fmt_short(d)) if short else t("working", d=fmt_dur(d))
+        return body
+
+    @staticmethod
+    def info_color(e):
+        st = e.get("status")
+        return TXT_RED if st == "waiting" else WORKING if st == "working" else SUB
+
+    def can_send(self, e):
+        """로봇에서 글을 보낼 수 있는 줄 (Claude 앱·VS Code 세션, 답하는 중에도)."""
+        return (e.get("src") == "claude" and bool(e.get("title"))
+                and e.get("entry") in ("claude-desktop", "claude-vscode")
+                and e.get("status") in ("done", "working", "waiting"))
+
+    def has_detail(self, e):
+        """› 로 펼칠 내용이 있는 줄 (답변·질문·보내기)."""
+        if e.get("src") != "claude":
+            return False
+        return bool((e.get("answer") and self.settings.get("answer_preview", True))
+                    or e.get("ask") or self.can_send(e))
+
+    # ---- 둥근 모양 (Tk 칸은 네모라서, 매끈한 둥근 바탕 그림을 깔고 그 위에 글자를 올린다) ----
+    def round_photo(self, w, h, fill, outline=None, ow=0, r=None, under=INNER):
+        key = (w, h, fill, outline, ow, r, under)
+        if key not in self._rounds:
+            k = 4
+            img = Image.new("RGB", (w * k, h * k), under)
+            ImageDraw.Draw(img).rounded_rectangle(
+                [0, 0, w * k - 1, h * k - 1], radius=(r if r is not None else h // 2) * k,
+                fill=fill, outline=outline, width=ow * k)
+            self._rounds[key] = ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
+        return self._rounds[key]
+
+    def round_label(self, parent, text, fill, fg, size=8, padx=7, pady=3, width=None, hover=None):
+        """알약 모양 글자 칸. hover=(바탕, 글자) 면 마우스를 올렸을 때 그 색으로."""
+        font = (FONT, size, "bold")
+        f = tkfont.Font(root=self.root, font=font)
+        w = width or f.measure(text) + S(padx) * 2
+        h = f.metrics("linespace") + S(pady) * 2
+        img = self.round_photo(w, h, fill)
+        lb = tk.Label(parent, text=text, image=img, compound="center", bg=INNER, fg=fg, font=font,
+                      bd=0, padx=0, pady=0, highlightthickness=0)
+        lb.pill = True                           # 줄에 마우스를 올려도 바탕 그대로
+        if hover:
+            on = self.round_photo(w, h, hover[0])
+            lb.bind("<Enter>", lambda ev: lb.configure(image=on, fg=hover[1]), add="+")
+            lb.bind("<Leave>", lambda ev: lb.configure(image=img, fg=fg), add="+")
+            lb.configure(cursor="hand2")
+        return lb
+
+    def pill_label(self, parent, e):
+        label = SRC_LABEL.get(e.get("src"), "Claude")
+        if e.get("entry") == "claude-vscode":
+            label += " · VS Code"
+        if e.get("browser"):                     # 웹 줄은 어느 브라우저인지도
+            label += " · " + BROWSER_NAME.get(e["browser"], e["browser"].capitalize())
+        bg, fg = PILL.get(e.get("src"), PILL["claude"])
+        return self.round_label(parent, label, bg, fg, size=7, padx=6, pady=1)
 
     def update_bubble(self, force=False):
         order = {"waiting": 0, "working": 1, "done": 2}
         items = sorted(self.shown_tasks().items(),
                        key=lambda kv: (order.get(kv[1].get("status"), 3),
                                        -kv[1].get("start", 0)))
+        if self.detail and self.detail not in self.tracker.tasks:
+            self.detail = None
         if not items or self.hidden:
             self.bubble.withdraw()
             self._bub_sig = None
             return
-        shown = items[:8]
-        compact = len(items) >= 4
         now = time.time()
-
-        sig = (compact, len(items) > 8, tuple(
-            (k, e.get("status"), e.get("title", ""),
-             "" if compact else e.get("prompt", ""),
-             e.get("ask", ""), tuple(c["label"] for c in e.get("choices") or []),
-             bool(e.get("sending")), self.reply_open == k,
-             e.get("answer", "")[:40], self.answer_open == k) for k, e in shown))
+        if self.detail:
+            e = self.tracker.tasks[self.detail]
+            sig = ("detail", self.detail, e.get("status"), e.get("title", ""),
+                   e.get("answer", "")[-80:], e.get("ask", ""),
+                   tuple(c["label"] for c in e.get("choices") or []),
+                   bool(e.get("sending")), tuple(self.reply_imgs))
+        else:
+            sig = ("list", len(items) > 8, tuple(
+                (k, e.get("status"), e.get("title", ""), e.get("prompt", ""), self.has_detail(e))
+                for k, e in items[:8]))
         if not force and sig == self._bub_sig:
             for k, lbl in self._infos:     # 시간 글자만 바꿔 깜빡임 방지
                 e = self.tracker.tasks.get(k)
                 if e:
-                    lbl.configure(text=self.info_text(e, now))
+                    lbl.configure(text=self.info_text(e, now, short=lbl.short))
             self.show_bubble()
             return
         self._bub_sig = sig
         self._infos = []
         for w in self.bub_box.winfo_children():
             w.destroy()
+        if self.detail:
+            self.build_detail(self.detail, self.tracker.tasks[self.detail], now)
+        else:
+            self.build_list(items, now)
+        self.show_bubble()
 
-        for key, e in shown:
+    # ---- 목록: 줄마다 한 줄 (아이콘 · 제목 · 이름표 · 짧은 상태 · › · ✕) ----
+    def build_list(self, items, now):
+        for i, (key, e) in enumerate(items[:8]):
             status = e.get("status")
-            src_color = SRC_COLOR.get(e.get("src"), ACCENT)
-            color = {"done": GREEN, "waiting": RED}.get(status, src_color)
-            mark = {"done": "✅ ", "waiting": "❗ "}.get(status, "")
+            if i:                                # 줄 사이 얇은 구분선
+                tk.Frame(self.bub_box, bg=LINE, height=1).pack(fill="x", padx=S(2))
             row = tk.Frame(self.bub_box, bg=INNER)
-            row.pack(fill="x", padx=S(2), pady=S(2) if compact else S(3))
-            top = tk.Frame(row, bg=INNER)
-            top.pack(fill="x")
+            row.pack(fill="x", padx=S(2), pady=S(3))
+            # 답을 기다리는 줄은 맨 앞 빨간 점으로 알린다 (제목 색은 그대로, 다른 줄은 빈자리)
+            bar = tk.Label(row, text="●" if status == "waiting" else " ", bg=INNER, fg=TXT_RED,
+                           font=(FONT, 7), width=1)
+            bar.pack(side="left", padx=(0, S(2)))
             name = e.get("title") or e.get("prompt") or e.get("folder", "?")
-            # 맨 앞 아이콘으로 어느 AI인지, 글자 색·✅/❗로 상태를 보인다
-            head = tk.Label(top, text=" " + mark + name[:28], image=self.icon(e.get("src")),
-                            compound="left", bg=INNER, fg=color, font=(FONT, 9, "bold"))
+            if len(name) > 24:
+                name = name[:23] + "…"
+            head = tk.Label(row, text=" " + name, image=self.icon(e.get("src")), compound="left",
+                            bg=INNER, fg=FG, font=(FONT, 9, "bold"))
+            head.hl = True                       # 마우스를 올리면 이 글자 색이 바뀜
             head.pack(side="left")
-            label = SRC_LABEL.get(e.get("src"), "Claude")
-            if e.get("entry") == "claude-vscode":
-                label += " · VS Code"
-            if e.get("browser"):                 # 웹 줄은 어느 브라우저인지도
-                label += " · " + BROWSER_NAME.get(e["browser"], e["browser"].capitalize())
-            srcl = tk.Label(top, text="  " + label,
-                            bg=INNER, fg=src_color, font=(FONT, 8, "bold"))
-            srcl.pack(side="left")
-            info = tk.Label(top, text=self.info_text(e, now), bg=INNER,
-                            fg=RED if status == "waiting" else SUB,
+            self.pill_label(row, e).pack(side="left", padx=(S(6), 0))
+            info = tk.Label(row, text=self.info_text(e, now, short=True), bg=INNER,
+                            fg=self.info_color(e),
                             font=(FONT, 8, "bold" if status == "waiting" else "normal"))
-            info.pack(side="left")
+            info.short = True
+            info.pack(side="left", padx=(S(6), 0))
             self._infos.append((key, info))
-            x = tk.Label(top, text=" ✕", bg=INNER, fg=SUB, font=(FONT, 9),
-                         cursor="hand2")
+            # (자세한 시각·걸린 시간은 상세 카드에. 여기서 글을 길게 바꾸면 줄이 넓어져 말풍선 밖으로 밀려남)
+            x = tk.Label(row, text=" ✕", bg=INNER, fg=SUB, font=(FONT, 9), cursor="hand2")
             x.pack(side="right")
             x.bind("<Button-1>", lambda ev, k=key: self.dismiss(k))
-            widgets = [row, top, head, srcl, info]
-            prompt = e.get("prompt")
-            if (not compact and status != "waiting" and prompt
-                    and e.get("title") and prompt != e.get("title")):
-                p = tk.Label(row, text=prompt[:60], bg=INNER, fg=FG, font=(FONT, 8),
-                             anchor="w", wraplength=S(220), justify="left")
-                p.pack(fill="x")
-                widgets.append(p)
-            for w in widgets:
+            parts = [row, bar, head, info, x]
+            if self.has_detail(e):
+                more = tk.Label(row, text=" ›", bg=INNER, fg=FG, font=(FONT, 12, "bold"),
+                                cursor="hand2")
+                more.pack(side="right")
+                more.bind("<Button-1>", lambda ev, k=key: self.open_detail(k))
+                parts.append(more)
+            for w in (row, bar, head, info):
                 w.bind("<Button-1>", lambda ev, k=key: self.row_click(k))
                 w.configure(cursor="hand2")
-            if (status in ("done", "waiting") and e.get("src") == "claude" and e.get("answer")
-                    and self.settings.get("answer_preview", True)):
-                self.add_answer(row, key, e, compact)
-            if status == "waiting" and e.get("src") == "claude" and e.get("ask"):
-                self.add_choices(row, key, e)
-            elif (status == "done" and e.get("entry") in ("claude-desktop", "claude-vscode")
-                  and e.get("title")):
-                self.add_reply(row, key, e)
             # 마우스를 올린 줄은 배경을 살짝 밝게 (더블 클릭할 줄이 어느 것인지 보이게)
-            parts = widgets + [x]
             for w in parts:
                 w.bind("<Enter>", lambda ev, ps=parts: self.hover(ps, True), add="+")
                 w.bind("<Leave>", lambda ev, ps=parts: self.hover(ps, False, ev), add="+")
         if len(items) > 8:
             tk.Label(self.bub_box, text=t("more", n=len(items) - 8), bg=INNER,
                      fg=SUB, font=(FONT, 8)).pack(anchor="w", padx=S(2))
-        self.show_bubble()
 
-    # ---- 선택지 질문에 답하기 ----
+    # ---- 상세 카드: › 를 누른 줄 하나만 (답변 · 질문 · 보내기) ----
+    def build_detail(self, key, e, now):
+        status = e.get("status")
+        card = tk.Frame(self.bub_box, bg=INNER)
+        card.pack(fill="x", padx=S(2), pady=S(1))
+        top = tk.Frame(card, bg=INNER)
+        top.pack(fill="x")
+        back = tk.Label(top, text="‹ " + t("back"), bg=INNER, fg=SUB, font=(FONT, 8), cursor="hand2")
+        back.pack(side="left")
+        back.bind("<Button-1>", lambda ev: self.close_detail())
+        x = tk.Label(top, text="✕", bg=INNER, fg=SUB, font=(FONT, 9), cursor="hand2")
+        x.pack(side="right")
+        x.bind("<Button-1>", lambda ev: self.close_detail())
+        self.pill_label(top, e).pack(side="right", padx=(0, S(8)))
+        title = tk.Label(card, text=" " + (e.get("title") or e.get("prompt") or "?"),
+                         image=self.icon(e.get("src")), compound="left", bg=INNER, fg=FG,
+                         font=(FONT, 10, "bold"), wraplength=S(300), justify="left", anchor="w",
+                         cursor="hand2")
+        title.pack(fill="x", pady=(S(6), 0))
+        title.bind("<Double-Button-1>", lambda ev: open_task(key, e))
+        info = tk.Label(card, text=self.info_text(e, now), bg=INNER, fg=self.info_color(e),
+                        font=(FONT, 8), anchor="w")
+        info.short = False
+        info.pack(fill="x")
+        self._infos.append((key, info))
+        if e.get("answer") and self.settings.get("answer_preview", True):
+            self.answer_box(card, e["answer"])
+        card_only = e.get("card") and not e.get("choices")    # 여러 문항 카드는 앱에서 답하게
+        if status == "waiting" and e.get("ask"):
+            tk.Label(card, text=e["ask"], bg=INNER, fg=FG, font=(FONT, 9, "bold"), anchor="w",
+                     justify="left", wraplength=S(300)).pack(fill="x", pady=(S(8), S(2)))
+            if card_only:
+                tk.Label(card, text=t("answer_in_app"), bg=INNER, fg=SUB, font=(FONT, 8),
+                         anchor="w").pack(fill="x")
+            elif not e.get("sending"):
+                for c in e.get("choices") or []:
+                    self.big_button(card, c["label"], lambda m=c["message"]: self.send_reply(key, m))
+        if e.get("sending"):
+            tk.Label(card, text=t("reply_sending"), bg=INNER, fg=SUB, font=(FONT, 8),
+                     anchor="w").pack(fill="x", pady=(S(6), 0))
+        elif (self.can_send(e) or (status == "waiting" and e.get("ask"))) and not card_only:
+            # 글은 언제든 여기서 (질문 카드면 '기타'로 들어감). 이미지는 Claude 앱 세션만
+            self.reply_entry(card, key,
+                             allow_img=not e.get("card") and e.get("entry") != "claude-vscode")
+
+    def answer_box(self, parent, text):
+        """마지막 답변을 읽기 좋게: 소제목은 굵게, 목록은 •, 문단 사이는 띄우고, 길면 칸 안에서 스크롤."""
+        lines = answer_lines(text)
+        cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0)   # 둥근 바탕을 깔 자리
+        tw = tk.Text(cv, bg=ANS_BG, fg=ANS_FG, font=(FONT, 10), wrap="word", relief="flat",
+                     width=40, padx=S(4), pady=S(2), highlightthickness=0, bd=0, cursor="arrow",
+                     spacing1=S(3), spacing2=S(3), spacing3=S(4))
+        tw.tag_configure("h", font=(FONT, 10, "bold"), foreground=ANS_HEAD, spacing1=S(7))
+        tw.tag_configure("li", lmargin1=S(4), lmargin2=S(16))
+        tw.tag_configure("gap", spacing1=S(3))
+        # 높이 = 실제로 접혀 보일 줄 수 (낱말 단위로 접는 것을 글자 폭으로 따라 해 본다) + 줄 간격 몫
+        f = tkfont.Font(root=self.root, font=(FONT, 10))
+        fb = tkfont.Font(root=self.root, font=(FONT, 10, "bold"))
+        room = f.measure("0") * 40
+
+        def wrapped(s, font, width):
+            rows, cur, sp = 1, 0, font.measure(" ")
+            for word in s.split(" "):
+                w = font.measure(word)
+                if cur and cur + sp + w > width:
+                    rows, cur = rows + 1, w
+                else:
+                    cur += (sp if cur else 0) + w
+                while cur > width:              # 아주 긴 낱말은 글자 단위로 접힘
+                    rows, cur = rows + 1, cur - width
+            return rows
+        n, extra = 0, 0
+        for kind, s in lines:
+            tw.insert("end", s + "\n", kind)
+            rows = wrapped(s, fb if kind == "h" else f, room - (S(16) if kind == "li" else 0))
+            n += rows
+            # spacing1·3 은 문단(원래 한 줄)마다, spacing2 는 접힌 줄 사이마다 붙는다
+            extra += S(7) + S(3) * (rows - 1) + (S(7) if kind == "h" else S(3) if kind == "gap" else 0)
+        tw.delete("end-2c", "end-1c")            # 마지막 빈 줄
+        n += -(-extra // (f.metrics("linespace") * 3))   # 줄 간격 몫은 Tk가 대부분 높이에 넣어 줌
+        tw.configure(height=max(2, min(n, 12)), state="disabled")   # 읽기만 (끌어서 복사는 됨)
+        tw.update_idletasks()
+        pad = S(9)
+        w, h = tw.winfo_reqwidth() + pad * 2, tw.winfo_reqheight() + pad * 2
+        cv.configure(width=w, height=h)
+        cv.create_image(0, 0, image=self.round_photo(w, h, ANS_BG, r=S(16)), anchor="nw")
+        cv.create_window(pad, pad, window=tw, anchor="nw")
+        cv.pack(anchor="w", pady=(S(8), 0))
+
     def chip(self, parent, text, command, sub=False):
         """작은 버튼 (말풍선이 투명 창이라 Label로 만들고 누르면 command)."""
-        # 선택지는 주황 글자로 눈에 띄게, 기타·답장은 차분하게 (올리면 주황 바탕)
         base, fg = (CHIP_SUB_BG, CHIP_SUB_FG) if sub else (CHIP_BG, CHIP_FG)
-        b = tk.Label(parent, text=text, bg=base, fg=fg, font=(FONT, 8, "bold"),
-                     padx=S(7), pady=S(2), cursor="hand2")
+        b = self.round_label(parent, text, base, fg, size=8, padx=10, pady=4,
+                             hover=(CHIP_HOVER, CHIP_FG))
         b.pack(side="left", padx=(0, S(4)))
         b.bind("<Button-1>", lambda ev: command())
-        b.bind("<Enter>", lambda ev: b.configure(bg=ACCENT, fg="#1b1c20"))
-        b.bind("<Leave>", lambda ev: b.configure(bg=base, fg=fg))
         return b
 
-    def add_choices(self, row, key, e):
-        box = tk.Frame(row, bg=INNER)
-        box.pack(fill="x", pady=(S(2), 0))
-        tk.Label(box, text=e["ask"], bg=INNER, fg=FG, font=(FONT, 8), anchor="w",
-                 justify="left", wraplength=S(260)).pack(fill="x")
-        if e.get("sending"):
-            tk.Label(box, text=t("reply_sending"), bg=INNER, fg=SUB,
-                     font=(FONT, 8)).pack(anchor="w")
-            return
-        if e.get("card") and not e.get("choices"):
-            return            # 여러 문항·여러 개 고르기 카드는 질문만 보여 주고 앱에서 답하게
-        btns = tk.Frame(box, bg=INNER)
-        btns.pack(anchor="w", pady=(S(3), 0))
-        for c in e.get("choices") or []:
-            self.chip(btns, c["label"], lambda m=c["message"]: self.send_reply(key, m))
-        self.chip(btns, t("reply_other"), lambda: self.open_other(key), sub=True)
-        if self.reply_open == key:
-            self.reply_entry(box, key)
+    def big_button(self, parent, text, command):
+        """선택지: 폭 가득한 큰 알약 버튼 (Claude 앱 질문 카드처럼 세로로)."""
+        b = self.round_label(parent, text, CHIP_BG, CHIP_FG, size=9, pady=6, width=S(330),
+                             hover=(CHIP_HOVER, CHIP_FG))
+        b.pack(anchor="w", pady=(S(4), 0))
+        b.bind("<Button-1>", lambda ev: command())
+        return b
 
-    def reply_entry(self, box, key):
+    def reply_entry(self, box, key, allow_img=True):
         f = tk.Frame(box, bg=INNER)
-        f.pack(fill="x", pady=(S(3), 0))
-        ent = tk.Entry(f, textvariable=self.reply_var, bg=ENTRY_BG, fg=ENTRY_FG,
-                       insertbackground=ENTRY_FG, relief="flat", font=(FONT, 9), width=26,
-                       highlightthickness=1, highlightbackground=ACCENT, highlightcolor=ACCENT)
-        ent.pack(side="left", fill="x", expand=True, ipady=S(2), padx=(0, S(4)))
+        f.pack(fill="x", pady=(S(8), 0))
+        # 입력칸도 알약 모양: 둥근 바탕(테두리 파랑)을 깔고 그 안에 테두리 없는 입력칸
+        lh = tkfont.Font(root=self.root, font=(FONT, 9)).metrics("linespace")
+        eh = lh + S(14)
+        ew = S(330) - (S(130) if allow_img else S(56))
+        cv = tk.Canvas(f, width=ew, height=eh, bg=INNER, highlightthickness=0, bd=0)
+        cv.create_image(0, 0, image=self.round_photo(ew, eh, ENTRY_BG, outline=ENTRY_LINE, ow=S(1)),
+                        anchor="nw")
+        ent = tk.Entry(cv, textvariable=self.reply_var, bg=ENTRY_BG, fg=ENTRY_FG,
+                       insertbackground=ENTRY_FG, relief="flat", bd=0, font=(FONT, 9),
+                       highlightthickness=0)
+        cv.create_window(eh // 2, eh // 2, window=ent, anchor="w", width=ew - eh)
+        cv.pack(side="left", padx=(0, S(4)))
         ent.bind("<Return>", lambda ev: self.send_reply(key, self.reply_var.get(), other=True))
-        ent.bind("<Escape>", lambda ev: self.open_other(None))
+        ent.bind("<Escape>", lambda ev: self.close_detail())
+        # 다른 곳(다른 창)을 누르면 카드를 닫는다 (쓰던 글·붙인 이미지는 기억해 둠)
+        ent.bind("<FocusOut>", lambda ev: self.root.after(250, self.close_if_unfocused))
+        if allow_img:
+            ent.bind("<Control-v>", lambda ev: self.paste_image())
+            ent.bind("<Control-V>", lambda ev: self.paste_image())
+            self.chip(f, t("img_pick"), self.pick_image, sub=True)   # 그림 글자(📎)는 작게 깨져서 글자로
         self.chip(f, t("reply_send"), lambda: self.send_reply(key, self.reply_var.get(), other=True))
+        if allow_img and self.reply_imgs:   # 붙인 이미지 미리보기 (누르면 그 이미지 빼기)
+            row = tk.Frame(box, bg=INNER)
+            row.pack(anchor="w", pady=(S(3), 0))
+            self._thumbs = []
+            for path in list(self.reply_imgs):
+                try:
+                    im = Image.open(path)
+                    im.thumbnail((S(44), S(44)))
+                    ph = ImageTk.PhotoImage(im)
+                except Exception:
+                    continue
+                self._thumbs.append(ph)
+                lb = tk.Label(row, image=ph, bg=ANS_BG, padx=S(2), pady=S(2), cursor="hand2")
+                lb.pack(side="left", padx=(0, S(4)))
+                lb.bind("<Button-1>", lambda ev, p=path: self.drop_image(p))
+            tk.Label(row, text=t("img_hint"), bg=INNER, fg=SUB, font=(FONT, 7)).pack(side="left")
         self.root.after(60, lambda: self.focus_entry(ent))
 
-    # ---- 끝난 답변 보기·답장 ----
-    def add_answer(self, row, key, e, compact):
-        """마지막 답변 앞부분을 줄 아래에 보여 주고, 누르면 전체를 펼친다 (다시 누르면 접기)."""
-        text = e["answer"]
-        if self.answer_open == key:
-            box = tk.Frame(row, bg=INNER)
-            box.pack(fill="x", pady=(S(2), 0))
-            lines = sum(1 + len(ln) // 34 for ln in text.splitlines()) or 1
-            tw = tk.Text(box, bg=ANS_BG, fg=ANS_FG, font=(FONT, 8), wrap="word", relief="flat",
-                         width=40, height=min(lines, 14), padx=S(4), pady=S(3),
-                         highlightthickness=0, cursor="arrow")
-            tw.insert("1.0", text)
-            tw.configure(state="disabled")      # 읽기만 (글자를 끌어서 복사는 됨)
-            tw.pack(fill="x")
-            less = tk.Label(box, text=t("answer_less"), bg=INNER, fg=SUB, font=(FONT, 8),
-                            cursor="hand2", anchor="w")
-            less.pack(fill="x")
-            less.bind("<Button-1>", lambda ev: self.toggle_answer(key))
-            return
-        flat = " ".join(text.split())
-        n = 56 if compact else 120
-        prev = tk.Label(row, text=flat[:n] + (" … ▾" if len(flat) > n else ""), bg=ANS_BG, fg=ANS_FG,
-                        font=(FONT, 8), anchor="w", justify="left", wraplength=S(256),
-                        padx=S(4), pady=S(2), cursor="hand2")
-        prev.pack(fill="x", pady=(S(2), 0))
-        prev.bind("<Button-1>", lambda ev: self.toggle_answer(key))
+    # ---- 답장에 이미지 붙이기 ----
+    # 붙인 이미지는 사진 폴더에 파일로 두었다가, 보낼 때 감시 프로그램이 잠깐 포커스를 받아 입력창에 진짜로 붙여넣는다.
+    def paste_image(self):
+        try:
+            from PIL import ImageGrab
+            got = ImageGrab.grabclipboard()
+        except Exception:
+            got = None
+        if isinstance(got, Image.Image):
+            path = os.path.join(image_dir(), time.strftime("paste-%Y%m%d-%H%M%S.png"))
+            try:
+                got.save(path)
+            except OSError:
+                return None
+            self.reply_imgs.append(path)
+        elif isinstance(got, list) and any(p.lower().endswith(IMG_EXTS) for p in got):
+            self.reply_imgs += [p for p in got if p.lower().endswith(IMG_EXTS)]
+        else:
+            return None               # 이미지가 아니면 보통 글 붙여넣기
+        self.update_bubble(force=True)
+        return "break"
 
-    def toggle_answer(self, key):
-        self.answer_open = None if self.answer_open == key else key
+    def close_if_unfocused(self):
+        if self.detail is None or self._picking:
+            return
+        try:
+            inside = self.bubble.focus_get() is not None     # 다른 앱으로 가면 None
+        except (tk.TclError, KeyError):
+            inside = False
+        if not inside:
+            self.close_detail()
+
+    def pick_image(self):
+        from tkinter import filedialog
+        self._picking = True
+        try:
+            paths = filedialog.askopenfilenames(
+                parent=self.bubble, title=t("img_pick"),
+                filetypes=[(t("img_pick"), " ".join("*" + x for x in IMG_EXTS))])
+        finally:
+            self._picking = False
+        self.reply_imgs += [p.replace("/", "\\") for p in paths]
         self.update_bubble(force=True)
 
-    def add_reply(self, row, key, e):
-        """끝난 데스크톱 앱 세션에 로봇에서 바로 이어서 글을 보낸다."""
-        box = tk.Frame(row, bg=INNER)
-        box.pack(fill="x", pady=(S(2), 0))
-        if e.get("sending"):
-            tk.Label(box, text=t("reply_sending"), bg=INNER, fg=SUB,
-                     font=(FONT, 8)).pack(anchor="w")
-            return
-        if self.reply_open == key:
-            self.reply_entry(box, key)
-            return
-        btns = tk.Frame(box, bg=INNER)
-        btns.pack(anchor="w")
-        self.chip(btns, t("reply_write"), lambda: self.open_other(key), sub=True)
+    def drop_image(self, path):
+        if path in self.reply_imgs:
+            self.reply_imgs.remove(path)
+        self.update_bubble(force=True)
 
     def focus_entry(self, ent):
         # 투명 창은 그냥은 키보드를 못 받아서, 말풍선 창을 앞으로 올린 뒤 입력칸에 커서를 둔다
         try:
             hwnd = ctypes.windll.user32.GetParent(self.bubble.winfo_id())
+            fg = ctypes.windll.user32.GetForegroundWindow()
+            if fg and fg != hwnd:     # 그 전에 쓰던 창 (이미지를 붙인 뒤 포커스를 여기로 돌려놓는다)
+                self.prev_fg = fg
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             self.bubble.focus_force()
             ent.focus_set()
@@ -2165,37 +2483,48 @@ class Pet:
         except tk.TclError:
             pass
 
-    def open_other(self, key):
-        self.reply_open = key
+    def open_detail(self, key):
+        self.detail = key
+        self.shown_at = time.time()
+        self.update_bubble(force=True)
+
+    def close_detail(self):
+        self.detail = None
         self.update_bubble(force=True)
 
     def send_reply(self, key, text, other=False):
         e = self.tracker.tasks.get(key)
         text = (text or "").strip()
+        images = (list(self.reply_imgs) if other and e and not e.get("card")
+                  and e.get("entry") != "claude-vscode" else [])
+        if images and not text:           # 이미지만 보내면 짧은 글을 같이
+            text = t("img_default")
         if not e or not text or not GPT:
             return
         if not e.get("title"):
             threading.Thread(target=msgbox, args=(t("reply_notitle"),), daemon=True).start()
             return
         e["sending"] = True
-        self.reply_key, self.reply_open = key, None
+        self.reply_key = key
         self.reply_var.set("")
+        self.reply_imgs = []
         vs = e.get("entry") == "claude-vscode"
         if e.get("card"):            # 질문 카드: 고르고 제출 (기타면 글을 넣어서)
             GPT.card(e["title"], "" if other else text, text if other else "", vscode=vs)
         else:                        # 다음 단계 상자·끝난 세션: 입력창에 글을 넣어 보내기
-            GPT.reply(e["title"], text, vscode=vs)
+            GPT.reply(e["title"], text, vscode=vs, images=images, restore=self.prev_fg)
         self.update_bubble(force=True)
 
     def reply_done(self, result):
         # 성공하면 곧 Claude Code가 새 턴을 시작해(훅 신호) 줄이 '진행 중'으로 바뀐다
+        # 답하는 중에 보낸 글은 새 턴 신호 없이 대기열로 들어가므로, 성공하면 '보내는 중' 표시를 바로 거둔다
         e = self.tracker.tasks.get(self.reply_key)
+        if e and (result != "ok" or e.get("status") == "working"):
+            e.pop("sending", None)
+            self.update_bubble(force=True)
         if result != "ok":
-            if e:
-                e.pop("sending", None)
             threading.Thread(target=msgbox, args=(t("reply_fail", e=result), 0x30),
                              daemon=True).start()
-            self.update_bubble(force=True)
 
     def icon(self, src):
         kind = ICON_KIND.get(src, "claude")
@@ -2212,11 +2541,13 @@ class Pet:
                     return
             except (tk.TclError, KeyError):
                 pass
+        # 네모 띠 대신 제목 글자 색만 바꿔 어느 줄인지 보이게 (말풍선 안은 둥근 모양만)
         for w in parts:
-            try:
-                w.configure(bg=HOVER if on else INNER)
-            except tk.TclError:
-                pass
+            if getattr(w, "hl", False):
+                try:
+                    w.configure(fg=HOVER if on else FG)
+                except tk.TclError:
+                    pass
 
     def show_bubble(self):
         if self.bubble.state() == "withdrawn":
@@ -2229,25 +2560,36 @@ class Pet:
         img = Image.new("RGBA", (bw * k, bh * k), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         o = S(2)
+        radius = getattr(self, "_radius", min(S(26), rect_h // 2))
         d.rounded_rectangle([o * k, o * k, (o + rect_w) * k, (o + rect_h) * k],
-                            radius=S(22) * k, fill=INNER, outline=BORDER, width=S(2) * k)
+                            radius=radius * k, fill=INNER, outline=BORDER, width=S(2) * k)
         bx = (o + rect_w) * k - S(2) * k
         tw = S(13)
         d.polygon([(bx, ty * k), ((rect_w + o + tw) * k, (ty + S(8)) * k),
                    (bx, (ty + S(16)) * k)], fill=BORDER)
         d.polygon([(bx - k, (ty + S(3)) * k), ((rect_w + o + tw - S(5)) * k, (ty + S(8)) * k),
                    (bx - k, (ty + S(13)) * k)], fill=INNER)
-        bg = Image.new("RGB", img.size, KEY)
-        bg.paste(img, mask=img.getchannel("A"))
-        return ImageTk.PhotoImage(bg.resize((bw, bh), Image.LANCZOS))
+        # 줄인 뒤 가장자리를 반투명 없이 딱 끊는다: 반투명 점은 투명색(검정)과 섞여
+        # 밝은 배경에서 가장자리에 거무스름한 점(구멍처럼 보임)이 생기기 때문
+        small = img.resize((bw, bh), Image.LANCZOS)
+        small.putalpha(small.getchannel("A").point(lambda v: 255 if v >= 128 else 0))
+        bg = Image.new("RGB", small.size, KEY)
+        bg.paste(small, mask=small.getchannel("A"))
+        return ImageTk.PhotoImage(bg)
 
     def position_bubble(self):
         if self.hidden or self.bubble.state() == "withdrawn":
             return
         self.bub_box.update_idletasks()
-        pad = S(13)
-        rect_w = self.bub_box.winfo_reqwidth() + pad * 2
-        rect_h = self.bub_box.winfo_reqheight() + pad * 2
+        # 캡슐형: 모서리 반지름을 크게(한 줄이면 반원, 펼친 카드도 큰 곡선) 하고,
+        # 둥근 모서리에 글이 닿지 않게 반지름의 약 0.3배만큼 여백을 둔다
+        bw0, bh0 = self.bub_box.winfo_reqwidth(), self.bub_box.winfo_reqheight()
+        radius = min(S(60), (bh0 + S(22)) // 2)
+        padx = max(S(20), int(radius * 0.32))
+        pady = max(S(11), int(radius * 0.32))
+        rect_w = bw0 + padx * 2
+        rect_h = bh0 + pady * 2
+        self._radius = min(radius, rect_h // 2)
         bw = rect_w + S(16)
         bh = max(rect_h + S(4), S(44))
         l, t_, r, b = work_area()
@@ -2255,6 +2597,9 @@ class Pet:
         x = max(l + 4, rx - bw - S(2))
         y = max(t_ + 4, min(ry + self.ch - bh - S(24), b - bh - 4))
         ty = max(S(12), min(ry + S(30) - y, bh - S(28)))
+        # 꼬리는 캡슐의 곧은 옆면에 붙인다 (둥근 모서리에 붙으면 떠 보임). 곧은 면이 없으면 가운데
+        lo, hi = int(self._radius * 0.75) - S(8), rect_h - int(self._radius * 0.75) - S(8)
+        ty = rect_h // 2 - S(8) if lo > hi else max(lo, min(ty, hi))
         sig = (bw, bh, x, y, ty)
         if sig == self._pos_sig:
             return
@@ -2266,7 +2611,7 @@ class Pet:
             self._img = self.bubble_image(bw, bh, rect_w, rect_h, ty)
         c.delete("bg")
         c.create_image(0, 0, anchor="nw", image=self._img, tags="bg")
-        c.coords("boxwin", S(2) + pad, S(2) + pad)
+        c.coords("boxwin", S(2) + padx, S(2) + pady)
         c.tag_raise("boxwin")
         self.bubble.geometry(f"{bw}x{bh}+{x}+{y}")
 
