@@ -307,7 +307,11 @@ recs = [
 with open(tp4, "w", encoding="utf-8") as f:
     for r in recs:
         f.write(json.dumps(r, ensure_ascii=False) + "\n")
-assert taskpet.claude_last_answer(tp4) == ("결과\n됐어요 a.py", "claude-desktop", ""), taskpet.claude_last_answer(tp4)
+assert taskpet.claude_last_answer(tp4) == ("## 결과\n**됐어요** `a.py`", "claude-desktop", ""), taskpet.claude_last_answer(tp4)
+# 보여 줄 때: 소제목 굵게, 목록은 •, 빈 줄 뒤 문단은 띄움, 굵게·코드 표시와 표 세로줄은 걷음
+assert taskpet.answer_lines("## 결과\n**됐어요** `a.py`\n\n- 하나\n1. 둘\n| a | b |\n|---|---|\n끝") == [
+    ("h", "결과"), ("p", "됐어요 a.py"), ("li", "• 하나"), ("li", "1. 둘"), ("p", "a · b"), ("p", "끝")]
+assert taskpet.fmt_short(35) == "35초" and taskpet.fmt_short(200) == "3분" and taskpet.fmt_short(7300) == "2시간"
 # VS Code 세션은 자동 제목(ai-title)이 줄 제목이 된다 (패널에서 그 이름으로 찾음)
 with open(tp4, "a", encoding="utf-8") as f:
     f.write(json.dumps({"type": "ai-title", "aiTitle": "인사", "entrypoint": "claude-vscode"}) + "\n")
