@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -663,7 +663,7 @@ def version_tuple(v):
 
 
 class Updater:
-    """켤 때와 3시간마다 GitHub 최신 릴리스를 확인한다. '새 버전' 줄을 더블 클릭하면 받아서 설치 프로그램을 실행
+    """켤 때와 10분마다 GitHub 최신 릴리스를 확인한다. '새 버전' 줄을 더블 클릭하면 받아서 설치 프로그램을 실행
     (설치 프로그램이 지금 로봇을 끄고 덮어쓴 뒤 새 로봇을 띄운다)."""
 
     def __init__(self):
@@ -672,7 +672,7 @@ class Updater:
 
     def tick(self):
         if time.time() >= self.next_check:
-            self.next_check = time.time() + 3 * 3600   # 켜 둔 채로도 반나절 안에 알게
+            self.next_check = time.time() + 10 * 60    # 10분마다 (GitHub 한도 시간당 60번 중 6번)
             threading.Thread(target=self._check, daemon=True).start()
 
     def take(self):
