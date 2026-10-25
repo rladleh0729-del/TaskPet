@@ -67,4 +67,9 @@ async function onHost(msg) {
   }
 }
 
+// 처음 설치하면 TaskPet(Windows 프로그램) 받는 페이지를 연다 — 확장만으로는 로봇이 없어서 아무것도 안 보이므로
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'install') chrome.tabs.create({ url: 'https://querybot.kr/taskpet/#install' });
+});
+
 connect();
