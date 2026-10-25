@@ -28,7 +28,7 @@ TaskPet은 어떤 정보도 개발자나 다른 곳으로 **보내지 않습니�
 
 이 정보도 화면 표시에만 쓰이고, 설치 폴더 밖이나 인터넷으로 보내지 않습니다.
 
-**새 버전 확인**: 프로그램은 하루 한 번 GitHub(`api.github.com`)에서 TaskPet 최신 릴리스 정보를 읽고, 사용자가 업데이트 줄을 더블 클릭하면 GitHub에서 새 설치 파일을 받습니다. 이때 사용자 정보는 보내지 않습니다(일반 웹 접속처럼 GitHub가 접속 주소를 볼 수는 있습니다).
+**새 버전 확인**: 프로그램은 켤 때와 10분마다 GitHub(`api.github.com`)에서 TaskPet 최신 릴리스 정보를 읽고, 사용자가 업데이트 줄을 더블 클릭하면 GitHub에서 새 설치 파일을 받습니다. 이때 사용자 정보는 보내지 않습니다(일반 웹 접속처럼 GitHub가 접속 주소를 볼 수는 있습니다).
 
 ## 제3자 제공·판매
 
@@ -50,6 +50,6 @@ TaskPet (Windows app) and the TaskPet for AI Chats browser extension **do not se
 
 The extension runs only on chatgpt.com, gemini.google.com, claude.ai, grok.com and kimi.ai (kimi.com). It only checks whether the input box shows a "Stop" button (to know if the AI is still answering), plus the current conversation's title, URL and tab id. It **never reads message content**, cookies, account data or browsing history. That state is passed via Native Messaging to the TaskPet app on the same computer only, and is used solely to show the status bubble and to switch back to the tab.
 
-The Windows app reads local Claude Code hook signals, Codex session logs, and the ChatGPT / Claude desktop apps' "working" / "running" indicators via Windows UI Automation, for display only. Once a day it reads the latest release info from GitHub (api.github.com) and, only when you double-click the update row, downloads the new installer from GitHub; no user data is sent. No data is sold or shared; there are no ads, analytics or trackers. Uninstalling removes the app folder and the settings it added.
+The Windows app reads local Claude Code hook signals, Codex session logs, and the ChatGPT / Claude desktop apps' "working" / "running" indicators via Windows UI Automation, for display only. Every 10 minutes it reads the latest release info from GitHub (api.github.com) and, only when you double-click the update row, downloads the new installer from GitHub; no user data is sent. No data is sold or shared; there are no ads, analytics or trackers. Uninstalling removes the app folder and the settings it added.
 
 Contact: https://github.com/rladleh0729-del/TaskPet/issues

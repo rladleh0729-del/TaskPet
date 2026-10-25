@@ -38,7 +38,7 @@ chatgpt.com·gemini.google.com·claude.ai·grok.com·kimi.ai에서 질문을 보
 - **로봇 드래그**: 위치 옮기기 (옮긴 자리를 기억해서 다시 켜도 그 자리에 나타납니다)
 - **말풍선 줄 더블 클릭**: 그 대화를 Claude 앱 / ChatGPT 앱 / 브라우저 탭에서 바로 열기 (마우스를 올린 줄은 배경이 밝아집니다)
 - **✕**: 그 줄 지우기
-- **새 버전 알림**: 하루 한 번 새 버전을 확인해, 있으면 초록 "⬆ 새 버전" 줄이 생깁니다. 더블 클릭하면 받아서 업데이트합니다.
+- **새 버전 알림**: 10분마다 새 버전을 확인해, 있으면 초록 "⬆ 새 버전" 줄이 생깁니다. 더블 클릭하면 받아서 업데이트합니다.
 - **우클릭**: 버전 보기 · 완료 기록 지우기 · 소리 끄기/켜기 · 브라우저 확장 받기 · 제거 · 종료
 - 줄 맨 앞의 작은 아이콘으로 어느 AI인지 구분됩니다 (Claude 주황 빛살, GPT 매듭, Gemini 별, Grok 사선, Kimi K). 각 회사를 떠올리게 직접 그린 모양이며, 공식 로고 파일이 아닙니다.
 
@@ -53,7 +53,7 @@ Claude Code 설정에 넣었던 훅, 자동 실행, 설치 폴더가 모두 지�
 - **Codex**: 설정을 바꾸지 않고 `~/.codex/sessions`의 기록 파일을 읽기만 합니다. Codex는 현재 시작·완료만 표시하고, 승인 대기는 표시하지 않습니다.
 - **ChatGPT 일반 채팅**: 일반 채팅은 컴퓨터에 기록이 남지 않아서, 작은 프로그램(`taskpet-chatgpt.exe`)이 2초마다 ChatGPT 데스크톱 앱 창을 Windows 화면 읽기 기능(UI Automation)으로 읽어 왼쪽 목록에서 **"작업 중" 표시가 붙은 대화 제목**만 확인합니다. 대화 내용은 읽지 않고, 창을 누르지도 않습니다(더블 클릭으로 대화를 열 때만 그 줄을 누릅니다). ChatGPT 창이 열려 있어야 하며, 시작·완료만 표시합니다.
 - **Claude 데스크톱 앱 일반 채팅**: 같은 프로그램이 Claude 앱 창도 읽어 왼쪽 목록에서 **"실행 중" 표시가 붙은 대화 제목**만 확인합니다. 채팅 화면이 보일 때만 판단하고, Code 탭에 있는 동안에는 상태를 그대로 둡니다.
-- **새 버전 확인**: 하루 한 번 GitHub의 최신 릴리스 정보(`api.github.com`)만 읽습니다. 내 정보는 보내지 않습니다.
+- **새 버전 확인**: 켤 때와 10분마다 GitHub의 최신 릴리스 정보(`api.github.com`)만 읽습니다. 내 정보는 보내지 않습니다.
 - **브라우저 AI 채팅**: 확장(`extension/`)이 chatgpt.com·gemini.google.com·claude.ai·grok.com·kimi.ai 페이지에서 입력창의 **'중지' 버튼이 있는지만** 확인해 답하는 중/끝남을 알아냅니다. 알아낸 상태(대화 제목·주소)는 브라우저의 Native Messaging으로 내 컴퓨터의 작은 프로그램(`taskpet-native.exe`)에 넘겨지고, 그 프로그램이 로봇에게 전달합니다. 대화 내용은 읽지 않습니다.
 - 모든 정보는 내 컴퓨터 안에서만 읽고, 어디에도 보내지 않습니다. (인터넷 연결은 새 버전 확인·받기뿐입니다)
 - "대화 바로 열기"는 각 앱의 공개되지 않은 링크 형식을 사용하므로, 앱 업데이트 후 동작하지 않을 수 있습니다. 그때는 가장 최근 대화가 열립니다.
@@ -77,7 +77,7 @@ TaskPet is a tiny orange pixel robot that sits at the bottom right of your scree
 - Download `TaskPet.exe` from Releases and run it. It installs itself and starts with Windows.
 - Click the robot to hide/show the bubble, drag it to move (the position is remembered), mute sounds from the right-click menu, small hand-drawn icons (not official logos) show which AI each row is from, double-click a row to jump to that chat, right-click for the menu.
 - Uninstall from the right-click menu or Windows Settings → Apps. All hooks it added are removed; your other settings stay untouched.
-- Claude Code is tracked through hooks it appends to `~/.claude/settings.json` (backed up first). Codex is tracked by reading `~/.codex/sessions` only. Regular ChatGPT chats leave no local record, so a small helper reads the ChatGPT window through Windows UI Automation every 2 seconds and only looks for the "working" indicator next to chat titles in the sidebar (the ChatGPT window must be open); the same helper reads the Claude desktop app's sidebar for the "running" indicator while its chat view is shown. Nothing leaves your computer; the only network access is a daily check of the latest GitHub release.
+- Claude Code is tracked through hooks it appends to `~/.claude/settings.json` (backed up first). Codex is tracked by reading `~/.codex/sessions` only. Regular ChatGPT chats leave no local record, so a small helper reads the ChatGPT window through Windows UI Automation every 2 seconds and only looks for the "working" indicator next to chat titles in the sidebar (the ChatGPT window must be open); the same helper reads the Claude desktop app's sidebar for the "running" indicator while its chat view is shown. Nothing leaves your computer; the only network access is a check of the latest GitHub release every 10 minutes.
 - Optional, for chatgpt.com, gemini.google.com, claude.ai, grok.com and kimi.ai in Chrome/Brave/Edge: right-click the robot → **브라우저 확장 받기** (get browser extension) to save it to `Downloads\TaskPet-extension`, open `chrome://extensions`, turn on Developer mode, choose **Load unpacked** and pick that folder, then fully restart the browser. The extension only checks whether the "Stop" button is present and passes the state (title, URL) to TaskPet through Native Messaging (`taskpet-native.exe`). It never reads message content.
 
 Not affiliated with Anthropic or OpenAI. "Claude", "Codex" and "ChatGPT" are trademarks of their respective owners.
