@@ -272,4 +272,25 @@ assert "c:old" not in tr.tasks
 pkg_ev("resume", "s9")
 tr.read_claude_events()
 assert tr.tasks["c:s9"]["status"] == "working", tr.tasks.get("c:s9")
+
+# 브라우저 확장 설치 권유: 브라우저는 있는데 확장이 없을 때만, 확장(스토어판 폴더·개발판 설정)이 있으면 안 뜸
+old_local = os.environ.get("LOCALAPPDATA", "")
+fake = os.path.join(tmp, "local")
+prof = os.path.join(fake, "Google", "Chrome", "User Data", "Default")
+os.makedirs(prof)
+os.environ["LOCALAPPDATA"] = os.path.join(tmp, "nobrowser")
+assert taskpet.browser_extension_state() == (False, False)
+os.environ["LOCALAPPDATA"] = fake
+assert taskpet.browser_extension_state() == (True, False)
+with open(os.path.join(prof, "Secure Preferences"), "w") as f:
+    f.write('{"extensions":{"settings":{"%s":{}}}}' % taskpet.EXT_IDS[1])
+assert taskpet.browser_extension_state() == (True, True)
+os.remove(os.path.join(prof, "Secure Preferences"))
+os.makedirs(os.path.join(prof, "Extensions", taskpet.EXT_IDS[0]))
+assert taskpet.browser_extension_state() == (True, True)
+os.environ["LOCALAPPDATA"] = old_local
+tr.apply_ext_tip(True)
+assert tr.tasks["t:ext"]["status"] == "tip"
+tr.apply_ext_tip(False)
+assert "t:ext" not in tr.tasks
 print("통과", events)
