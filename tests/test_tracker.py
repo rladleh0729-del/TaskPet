@@ -314,4 +314,20 @@ with open(tp4, "a", encoding="utf-8") as f:
 row = {"id": "nosuch"}
 taskpet.Tracker.note_answer(row, tp4)
 assert row["entry"] == "claude-vscode" and row["title"] == "인사", row
+
+# 보고 있는 세션은 알리지 않기: VS Code 창이 보이면 VS Code 세션 전부, Claude 앱은 띄워 둔 그 세션만 (둘 다 보일 수도 있음)
+from types import SimpleNamespace
+pet = SimpleNamespace(settings={}, seen=(("code",), "", ""))
+vs = {"src": "claude", "entry": "claude-vscode", "title": "인사"}
+app_row = {"src": "claude", "entry": "claude-desktop", "title": "선택지 요청"}
+assert taskpet.Pet.viewed(pet, vs) and not taskpet.Pet.viewed(pet, app_row)
+pet.seen = (("claude", "code"), "선택지 요청", "")
+assert taskpet.Pet.viewed(pet, app_row) and taskpet.Pet.viewed(pet, vs)
+assert not taskpet.Pet.viewed(pet, dict(app_row, title="다른 세션"))
+# ChatGPT 앱: 띄워 둔 대화(일반 채팅·Codex)만
+pet.seen = (("chatgpt",), "", "Join Moltbook")
+assert taskpet.Pet.viewed(pet, {"src": "codex", "title": "Join Moltbook"})
+assert not taskpet.Pet.viewed(pet, {"src": "chatgpt", "title": "작업 알림 로봇 소개"})
+pet.settings["hide_viewed"] = False
+assert not taskpet.Pet.viewed(pet, app_row)
 print("통과", events)
