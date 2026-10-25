@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.5.5"
+VERSION = "1.5.6"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -91,6 +91,12 @@ T = {
     "autohide_off": ("안 함", "Never"),
     "sec": ("{n}초 뒤", "after {n}s"),
     "min1": ("1분 뒤", "after 1 min"),
+    "autohide_ask": ("직접 정하기…", "Custom…"),
+    "thinking": ("생각 중…", "Thinking…"),
+    "older_hint": ("▲ 위로 올리면 이전 대화", "▲ Scroll up for older messages"),
+    "autohide_mine": ("직접: {d} 뒤", "custom: after {d}"),
+    "autohide_prompt": ("몇 초 뒤에 말풍선을 숨길까요? (3 ~ 3600초)",
+                        "Hide the bubble after how many seconds? (3–3600)"),
     "hide_viewed": ("화면에 보이는 세션은 알리지 않기", "Don't notify for sessions on screen"),
     "answer_preview": ("끝난 답변 미리보기", "Show finished answers"),
     "ext_menu": ("브라우저 확장 설치 (웹 스토어)", "Install browser extension (Web Store)"),
@@ -161,6 +167,8 @@ TEAL = "#3dd6c6"
 ANS_BG = "#fffaf3"        # 답변 칸: 거의 흰색에 주황을 살짝 섞음
 ANS_FG = "#1e1e1e"        # 답변 글자: 검은색
 ANS_HEAD = "#000000"
+MY_BG = "#fbc98f"         # 내가 보낸 메시지 말풍선: 로봇 얼굴 같은 주황
+MY_FG = "#2a1608"
 CHIP_BG = "#f39a3f"       # 선택지 버튼: 로봇 주황 + 흰 글자
 CHIP_FG = "#ffffff"
 CHIP_HOVER = "#e0801f"    # 버튼에 마우스를 올리면 조금 진한 주황
@@ -1097,8 +1105,9 @@ def claude_turn_asks(transcript, since):
 
 
 def claude_last_answer(transcript):
-    """이번 턴의 마지막 답변 글 (마지막 도구 사용 뒤에 Claude가 쓴 글), 세션을 연 곳, 자동으로 붙은 세션 제목.
-    돌려주는 값: (답변 글, "claude-desktop" | "claude-vscode" | "cli" | "", 제목)
+    """이번 턴의 마지막 답변 글 (마지막 도구 사용 뒤에 Claude가 쓴 글), 세션을 연 곳, 자동으로 붙은 세션 제목,
+    그리고 내가 마지막으로 보낸 메시지.
+    돌려주는 값: (답변 글, "claude-desktop" | "claude-vscode" | "cli" | "", 제목, 내 메시지)
     VS Code 패널은 이 자동 제목을 세션 이름으로 보여 준다."""
     try:
         size = os.path.getsize(transcript)
@@ -1106,8 +1115,8 @@ def claude_last_answer(transcript):
             f.seek(max(0, size - 600_000))
             tail = f.read()
     except OSError:
-        return "", "", ""
-    texts, entry, ai_title = [], "", ""
+        return "", "", "", ""
+    texts, entry, ai_title, question = [], "", "", ""
     for line in tail.splitlines():
         try:
             rec = json.loads(line)
@@ -1124,6 +1133,9 @@ def claude_last_answer(transcript):
         content = msg.get("content")
         if isinstance(content, str):
             content = [{"type": "text", "text": content}]
+        said = user_said(rec)                    # 내가 보낸 글
+        if said:
+            question = said
         for part in content if isinstance(content, list) else []:
             if not isinstance(part, dict):
                 continue
@@ -1135,7 +1147,63 @@ def claude_last_answer(transcript):
                 texts.append(str(part.get("text") or ""))
     answer = "\n\n".join(x.strip() for x in texts if x.strip())
     # 원래 글 그대로 둔다 (보여 줄 때 answer_lines 로 소제목·목록을 다듬음)
-    return answer.strip()[:4000], entry, ai_title.strip()[:60]
+    return answer.strip()[:4000], entry, ai_title.strip()[:60], question.strip()[:1000]
+
+
+def user_said(rec):
+    """기록 한 줄이 내가 보낸 메시지면 그 글, 아니면 None.
+    시스템이 덧붙인 꼬리표(<...>)·첨부 설명은 빼고, 이미지는 (이미지)로."""
+    if not isinstance(rec, dict) or rec.get("type") != "user" or rec.get("isMeta"):
+        return None
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return None
+    said = [str(p.get("text") or "").strip() for p in content
+            if isinstance(p, dict) and p.get("type") == "text"]
+    said = [x for x in said if x and not x.startswith(("<", "[Image"))]
+    if any(isinstance(p, dict) and p.get("type") == "image" for p in content):
+        said.append("(이미지)")
+    return "\n".join(said) if said else None
+
+
+def claude_turns(transcript, tail_bytes=1_500_000):
+    """대화를 차례대로: [{"me": 내 메시지, "ai": [Claude가 쓴 글들]}, ...] (끝에서 tail_bytes 만큼만 읽음).
+    돌려주는 값: (대화 목록, 앞에 더 있는지). 위로 스크롤하면 tail_bytes 를 늘려 다시 부른다."""
+    try:
+        size = os.path.getsize(transcript)
+        with open(transcript, "rb") as f:
+            f.seek(max(0, size - tail_bytes))
+            tail = f.read()
+    except OSError:
+        return [], False
+    more = size > tail_bytes
+    lines = tail.splitlines()
+    if more and lines:
+        lines = lines[1:]                        # 잘린 첫 줄
+    turns, cur = [], None
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        said = user_said(rec)
+        if said:
+            cur = {"me": said, "ai": []}
+            turns.append(cur)
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue
+        msg = rec.get("message")
+        for part in (msg.get("content") if isinstance(msg, dict) else None) or []:
+            if isinstance(part, dict) and part.get("type") == "text" and str(part.get("text") or "").strip():
+                if cur is None:                  # 잘린 앞부분의 답
+                    cur = {"me": "", "ai": []}
+                    turns.append(cur)
+                cur["ai"].append(str(part["text"]).strip())
+    return turns, more
 
 
 def claude_pending_card(transcript):
@@ -1532,7 +1600,7 @@ class Tracker:
 
     @staticmethod
     def note_answer(e, transcript):
-        e["answer"], e["entry"], ai_title = claude_last_answer(transcript)
+        e["answer"], e["entry"], ai_title, e["asked"] = claude_last_answer(transcript)
         # VS Code 세션은 따로 붙인 이름이 없으면 자동 제목이 패널의 세션 이름이다 (로봇에서 답할 때 이걸로 찾음)
         if e["entry"] == "claude-vscode" and ai_title and not claude_title(
                 {"transcript_path": transcript, "session_id": e.get("id", "")}):
@@ -1787,6 +1855,7 @@ class Pet:
         self._infos = []
         self._icons = {}
         self._bot = {}                # 로봇 그림 (표정·팔 모양별로 한 번만 그림)
+        self._hist = {}               # 대화 기록창 상태 (어느 세션·몇 개·읽던 자리)
         self._rounds = {}             # 둥근 바탕 그림 (크기·색별로 한 번만 그림)
         self._picking = False         # 📎 파일 고르는 창이 떠 있는 동안
         self.detail = None            # › 로 펼친 상세 카드의 줄 (없으면 목록)
@@ -1935,6 +2004,21 @@ class Pet:
             self.hidden = True
             self.update_bubble(force=True)
 
+    def follow_progress(self):
+        """펼친 카드의 대화 기록이 바뀌면(새 글·새 답) 2초 안에 다시 그린다 — 일하는 중 글도 실시간으로."""
+        e = self.tracker.tasks.get(self.detail) if self.detail else None
+        if not e or e.get("src") != "claude" or not e.get("transcript"):
+            return
+        if time.time() - getattr(self, "_live_at", 0) < 2:
+            return
+        self._live_at = time.time()
+        try:
+            mtime = os.path.getmtime(e["transcript"])
+        except OSError:
+            return
+        if self._hist.get("key") == self.detail and mtime != self._hist.get("mtime"):
+            self.update_bubble(force=True)
+
     def set_setting(self, key, value):
         self.save_setting(key, value)
         self.shown_at = time.time()
@@ -1946,10 +2030,14 @@ class Pet:
         hide = tk.Menu(sm, tearoff=0, bg=INNER, fg=FG,
                        activebackground=ACCENT, activeforeground="#1b1c20")
         cur = self.settings.get("autohide", 0)
-        for sec, label in ((0, t("autohide_off")), (10, t("sec", n=10)), (30, t("sec", n=30)),
-                           (60, t("min1"))):
+        presets = ((0, t("autohide_off")), (10, t("sec", n=10)), (30, t("sec", n=30)), (60, t("min1")))
+        for sec, label in presets:
             hide.add_command(label=("● " if cur == sec else "○ ") + label,
                              command=lambda v=sec: self.set_setting("autohide", v))
+        custom = cur not in [p[0] for p in presets]
+        hide.add_separator()
+        hide.add_command(label=("● " + t("autohide_mine", d=fmt_dur(cur))) if custom else "○ " + t("autohide_ask"),
+                         command=self.ask_autohide)
         sm.add_cascade(label=t("autohide"), menu=hide)
         flags = (("hide_viewed", True, t("hide_viewed")), ("answer_preview", True, t("answer_preview")))
         for key, default, label in flags:
@@ -1958,6 +2046,15 @@ class Pet:
                            command=lambda k=key, v=not on: self.set_setting(k, v))
         sm.add_command(label=("✓ " if MUTED else "   ") + t("mute"), command=self.toggle_mute)
         return sm
+
+    def ask_autohide(self):
+        """말풍선 자동 숨김 시간을 직접 정한다 (초, 3초~1시간)."""
+        from tkinter import simpledialog
+        cur = self.settings.get("autohide", 0) or 20
+        v = simpledialog.askinteger(APP, t("autohide_prompt"), parent=self.root,
+                                    initialvalue=cur, minvalue=3, maxvalue=3600)
+        if v:
+            self.set_setting("autohide", int(v))
 
     def get_extension(self):
         # Chrome 웹 스토어 페이지를 기본 브라우저로 연다 (Chrome·Brave·Edge 모두 여기서 설치)
@@ -2039,6 +2136,7 @@ class Pet:
                     self.seen = seen
                     self.update_bubble(force=True)
             self.auto_hide()
+            self.follow_progress()
             res = GPT.take_reply() if GPT else None
             if res:
                 self.reply_done(res)
@@ -2216,6 +2314,7 @@ class Pet:
             return
         self._bub_sig = sig
         self._infos = []
+        self.save_chat_state()
         for w in self.bub_box.winfo_children():
             w.destroy()
         if self.detail:
@@ -2297,8 +2396,8 @@ class Pet:
         info.short = False
         info.pack(fill="x")
         self._infos.append((key, info))
-        if e.get("answer") and self.settings.get("answer_preview", True):
-            self.answer_box(card, e["answer"])
+        if e.get("src") == "claude" and e.get("transcript"):
+            self.chat_area(card, key, e)         # 대화 기록 (내 메시지 오른쪽 · Claude 왼쪽)
         card_only = e.get("card") and not e.get("choices")    # 여러 문항 카드는 앱에서 답하게
         if status == "waiting" and e.get("ask"):
             tk.Label(card, text=e["ask"], bg=INNER, fg=FG, font=(FONT, 9, "bold"), anchor="w",
@@ -2317,7 +2416,112 @@ class Pet:
             self.reply_entry(card, key,
                              allow_img=not e.get("card") and e.get("entry") != "claude-vscode")
 
-    def answer_box(self, parent, text):
+    # ---- 대화 기록창: 최근 대화를 위아래로, 맨 아래(최신)부터. 맨 위까지 올리면 이전 대화를 더 불러옴 ----
+    def chat_area(self, parent, key, e):
+        h = self._hist
+        if h.get("key") != key:
+            h.clear()
+            h.update(key=key, bytes=1_500_000, show=6, at_bottom=True)
+        try:
+            mtime = os.path.getmtime(e["transcript"])
+        except OSError:
+            mtime = 0
+        if h.get("mtime") != mtime or h.get("dirty"):
+            h["turns"], h["more"] = claude_turns(e["transcript"], h["bytes"])
+            h["mtime"], h["dirty"] = mtime, False
+        turns = h["turns"]
+        shown = turns[-h["show"]:]
+        working = e.get("status") == "working"
+        cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0, yscrollincrement=S(14))
+        inner = tk.Frame(cv, bg=INNER)
+        cv.create_window(0, 0, window=inner, anchor="nw")
+        if len(turns) > len(shown) or h.get("more"):
+            tk.Label(inner, text=t("older_hint"), bg=INNER, fg=SUB, font=(FONT, 8)).pack(pady=(S(2), 0))
+        for i, turn in enumerate(shown):
+            if turn["me"]:
+                self.my_message(inner, turn["me"])
+            if i == len(shown) - 1 and working:  # 일하는 중이면 마지막 칸에 지금 쓰고 있는 글
+                tk.Label(inner, text=t("thinking"), bg=INNER, fg=WORKING, font=(FONT, 8, "bold"),
+                         anchor="w").pack(fill="x", pady=(S(8), 0))
+            text = "\n\n".join(turn["ai"])
+            if text and self.settings.get("answer_preview", True):
+                self.answer_box(inner, text, max_lines=80)
+        inner.update_idletasks()
+        W, H = max(inner.winfo_reqwidth(), S(330)), inner.winfo_reqheight()
+        view = min(H, S(360))
+        cv.configure(width=W, height=view, scrollregion=(0, 0, W, H))
+        cv.pack(fill="x", pady=(S(4), 0))
+        self._chat, self._chat_h = cv, H
+
+        def wheel_to_me(w):                      # 안쪽 칸들이 휠을 먹지 않고 이 기록창이 받게
+            w.bind("<MouseWheel>", self.chat_wheel)
+            for c in w.winfo_children():
+                wheel_to_me(c)
+        wheel_to_me(cv)
+        # 읽던 자리: 맨 아래였으면 계속 최신으로, 이전 대화를 불러왔으면 보던 글이 그 자리에,
+        # 위로 올려 읽던 중이면 새 글이 와도 그 위치 그대로
+        if h.get("at_bottom", True) or H <= view:
+            cv.yview_moveto(1.0)
+        elif h.pop("keep_bottom", False):
+            cv.yview_moveto(max(0.0, (H - h.get("from_bottom", H)) / H))
+        else:
+            cv.yview_moveto(h.get("top_px", 0) / H)
+
+    def save_chat_state(self):
+        cv = getattr(self, "_chat", None)
+        self._chat = None
+        if not cv:
+            return
+        try:
+            a, b = cv.yview()
+        except tk.TclError:
+            return
+        H = self._chat_h
+        self._hist.update(at_bottom=b >= 0.999, top_px=a * H, from_bottom=H - a * H)
+
+    def chat_wheel(self, ev):
+        cv = getattr(self, "_chat", None)
+        if not cv:
+            return "break"
+        cv.yview_scroll(-3 if ev.delta > 0 else 3, "units")
+        if ev.delta > 0 and cv.yview()[0] <= 0.0:
+            self.load_older()
+        return "break"
+
+    def load_older(self):
+        """맨 위까지 올리면 이전 대화 6개를 더 (보여 줄 게 모자라면 기록 파일을 더 앞에서부터 읽음)."""
+        if time.time() - getattr(self, "_older_at", 0) < 0.5:
+            return
+        h = self._hist
+        if h.get("show", 0) < len(h.get("turns", [])):
+            h["show"] += 6
+        elif h.get("more"):
+            h["bytes"] *= 3
+            h["show"] += 6
+            h["dirty"] = True
+        else:
+            return
+        self._older_at = time.time()
+        self.save_chat_state()
+        h["keep_bottom"], h["at_bottom"] = True, False
+        self.update_bubble(force=True)
+
+    def my_message(self, parent, text):
+        """내가 보낸 메시지: 오른쪽에 붙인 주황 말풍선 (길면 앞부분만)."""
+        if len(text) > 300:
+            text = text[:299] + "…"
+        cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0)
+        lb = tk.Label(cv, text=text, bg=MY_BG, fg=MY_FG, font=(FONT, 10), justify="left",
+                      wraplength=S(250), padx=0, pady=0)
+        lb.update_idletasks()
+        padx, pady = S(12), S(7)
+        w, h = lb.winfo_reqwidth() + padx * 2, lb.winfo_reqheight() + pady * 2
+        cv.configure(width=w, height=h)
+        cv.create_image(0, 0, image=self.round_photo(w, h, MY_BG, r=min(S(16), h // 2)), anchor="nw")
+        cv.create_window(padx, pady, window=lb, anchor="nw")
+        cv.pack(anchor="e", pady=(S(8), 0))
+
+    def answer_box(self, parent, text, tail=False, max_lines=12):
         """마지막 답변을 읽기 좋게: 소제목은 굵게, 목록은 •, 문단 사이는 띄우고, 길면 칸 안에서 스크롤."""
         lines = answer_lines(text)
         cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0)   # 둥근 바탕을 깔 자리
@@ -2352,7 +2556,7 @@ class Pet:
             extra += S(7) + S(3) * (rows - 1) + (S(7) if kind == "h" else S(3) if kind == "gap" else 0)
         tw.delete("end-2c", "end-1c")            # 마지막 빈 줄
         n += -(-extra // (f.metrics("linespace") * 3))   # 줄 간격 몫은 Tk가 대부분 높이에 넣어 줌
-        tw.configure(height=max(2, min(n, 12)), state="disabled")   # 읽기만 (끌어서 복사는 됨)
+        tw.configure(height=max(2, min(n, max_lines)), state="disabled")   # 읽기만 (끌어서 복사는 됨)
         tw.update_idletasks()
         pad = S(9)
         w, h = tw.winfo_reqwidth() + pad * 2, tw.winfo_reqheight() + pad * 2
@@ -2360,6 +2564,8 @@ class Pet:
         cv.create_image(0, 0, image=self.round_photo(w, h, ANS_BG, r=S(16)), anchor="nw")
         cv.create_window(pad, pad, window=tw, anchor="nw")
         cv.pack(anchor="w", pady=(S(8), 0))
+        if tail:                                 # 일하는 중이면 가장 최근 글이 보이게 끝으로
+            tw.see("end")
 
     def chip(self, parent, text, command, sub=False):
         """작은 버튼 (말풍선이 투명 창이라 Label로 만들고 누르면 command)."""
