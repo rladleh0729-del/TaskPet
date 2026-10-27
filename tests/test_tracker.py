@@ -301,7 +301,7 @@ recs = [
     {"type": "assistant", "message": {"content": [{"type": "text", "text": "먼저 볼게요"}]}},
     {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Read"}]}},
     {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}},
-    {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": "..."},
+    {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": ""},   # 숨은 생각은 빈칸
                                                    {"type": "text", "text": "## 결과\n**됐어요** `a.py`"}]}},
 ]
 with open(tp4, "w", encoding="utf-8") as f:
@@ -311,12 +311,99 @@ assert taskpet.claude_last_answer(tp4) == ("## 결과\n**됐어요** `a.py`", "c
 # 보여 줄 때: 소제목 굵게, 목록은 •, 빈 줄 뒤 문단은 띄움, 굵게·코드 표시와 표 세로줄은 걷음
 assert taskpet.answer_lines("## 결과\n**됐어요** `a.py`\n\n- 하나\n1. 둘\n| a | b |\n|---|---|\n끝") == [
     ("h", "결과"), ("p", "됐어요 a.py"), ("li", "• 하나"), ("li", "1. 둘"), ("p", "a · b"), ("p", "끝")]
-turns, more = taskpet.claude_turns(tp4)       # 대화 기록: 내 메시지 + 그 뒤 Claude 글 전부
-assert turns == [{"me": "질문", "ai": ["먼저 볼게요", "## 결과\n**됐어요** `a.py`"]}] and not more, turns
+turns, more = taskpet.claude_turns(tp4)       # 대화 기록: 내 메시지 + 그 뒤 Claude 글·도구를 차례대로
+assert len(turns) == 1 and not more, turns
+assert turns[0]["me"] == "질문" and turns[0]["ai"] == ["먼저 볼게요", "## 결과\n**됐어요** `a.py`"], turns
+assert turns[0]["parts"] == [("text", "먼저 볼게요"), ("tools", [("read", "")]),
+                             ("text", "## 결과\n**됐어요** `a.py`")], turns[0]["parts"]
+assert turns[0]["open"] is None and taskpet.claude_plan(tp4)[0] is None
 with open(tp4, "a", encoding="utf-8") as f:   # 새 메시지가 오면 그 뒤 글만
     f.write(json.dumps({"type": "user", "message": {"content": "다음"}}, ensure_ascii=False) + "\n")
     f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "볼게요"}]}}, ensure_ascii=False) + "\n")
-assert taskpet.claude_turns(tp4)[0][-1] == {"me": "다음", "ai": ["볼게요"]}
+last = taskpet.claude_turns(tp4)[0][-1]
+assert last["me"] == "다음" and last["ai"] == ["볼게요"], last
+
+# 채팅 기록: 도구 줄·지금 하는 일·계획, 끼워 보낸 메시지, 시스템 글 빼기
+tp7 = os.path.join(tmp, "chat.jsonl")
+
+
+def tool(tid, name, **inp):
+    return {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}}
+
+
+def done(tid):
+    return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid}]}}
+
+
+plan_tool = "mcp__ccd_turn__update_plan"
+recs = [
+    {"type": "user", "isCompactSummary": True, "message": {"content": "This session is being continued"}},
+    {"type": "user", "timestamp": iso(120), "message": {"content": "  <pasted_content id=\"1\">붙인 글</pasted_content> 고쳐 줘"}},
+    tool("p1", plan_tool, items=[{"content": "보기", "status": "in_progress"},
+                                 {"content": "고치기", "status": "pending"},
+                                 {"content": "시험", "status": "pending"}], scope="first_task"),
+    tool("r1", "Read", file_path="C:\\a\\taskpet.py"), done("r1"),
+    tool("r2", "Read", file_path="C:\\a\\taskpet.py"), done("r2"),
+    tool("g1", "Grep", pattern="def x"), done("g1"),
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "찾았어요"}]}},
+    tool("p2", plan_tool, advance=True),
+    tool("e1", "Edit", file_path="C:\\a\\b.py"), done("e1"),
+    tool("e2", "Edit", file_path="C:\\a\\c.py"), done("e2"),
+    {"type": "user", "message": {"content": "[Request interrupted by user]"}},
+    {"type": "user", "isMeta": True, "message": {"content": "<system-reminder>x</system-reminder>"}},
+    {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "이것도 해 줘", "commandMode": "prompt"}},
+    tool("b1", "Bash", command="dir", description="폴더 보기"),
+]
+with open(tp7, "w", encoding="utf-8") as f:
+    for r in recs:
+        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+turns, more = taskpet.claude_turns(tp7)
+assert [x["me"] for x in turns] == ["붙인 글 고쳐 줘", "이것도 해 줘"], turns
+first, second = turns
+assert first["parts"] == [("tools", [("read", "taskpet.py"), ("read", "taskpet.py"), ("search", "def x")]),
+                          ("text", "찾았어요"), ("tools", [("edit", "b.py"), ("edit", "c.py")])], first["parts"]
+assert taskpet.tools_summary(first["parts"][0][1]) == "읽음 taskpet.py · 검색함 1개"   # 같은 파일 두 번은 이름 하나
+assert taskpet.tools_summary(first["parts"][2][1]) == "편집함 2개"
+plan, _ = taskpet.claude_plan(tp7)
+assert [x["status"] for x in plan] == ["completed", "in_progress", "pending"], plan
+assert second["open"] == ("run", "폴더 보기") and taskpet.tool_doing(second["open"]) == "명령 실행 중 폴더 보기"
+assert first["t0"] > 0 and abs(first["t0"] - (time.time() - 120)) < 5
+# 계획은 파일 전체에서 이어 읽고(새로 붙은 부분만), 마무리(wrap_up)하면 다 끝남
+with open(tp7, "a", encoding="utf-8") as f:
+    f.write(json.dumps(done("b1")) + "\n")
+    f.write(json.dumps(tool("w1", "mcp__ccd_turn__wrap_up", recap="끝")) + "\n")
+turns, _ = taskpet.claude_turns(tp7)
+assert [x["status"] for x in taskpet.claude_plan(tp7)[0]] == ["completed"] * 3
+assert taskpet._PLAN_CACHE[tp7][0] == os.path.getsize(tp7)
+assert turns[1]["open"] is None                   # 마무리 도구는 '지금 하는 일'로 안 보임
+assert taskpet.plan_step(None, plan_tool, {"advance": True}) is None
+assert [x["status"] for x in taskpet.plan_step(plan, plan_tool, {"done": [2], "start": 3})] == [
+    "completed", "completed", "in_progress"]
+# 앞부분이 잘리는 큰 기록이어도 계획은 보인다
+assert taskpet.claude_turns(tp7, 400)[1] and taskpet.claude_plan(tp7)[0]
+# '생각' 칸(thinking)에 남은 진행 안내 글도 대화에 (내용 없는 생각은 빼고), 그림도 (내가 붙인 것·도구 결과)
+tp8 = os.path.join(tmp, "chat2.jsonl")
+png = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+recs = [
+    {"type": "user", "message": {"content": [{"type": "text", "text": "봐 줘"}, png]}},
+    {"type": "assistant", "message": {"content": [{"type": "thinking", "thinking": ""},
+                                                   {"type": "thinking", "thinking": "화면을 볼게요"}]}},
+    tool("r9", "Read", file_path="C:\\a\\shot.png"),
+    {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "r9", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBBB"}}]}]}},
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "잘 보여요"}]}},
+    {"type": "attachment", "attachment": {"type": "queued_command", "prompt": [png, {"type": "text", "text": "이것도"}]}},
+]
+with open(tp8, "w", encoding="utf-8") as f:
+    for r in recs:
+        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+turns, _ = taskpet.claude_turns(tp8)
+assert turns[0]["me"] == "봐 줘\n(이미지)" and turns[0]["imgs"] == ["AAAA"], turns[0]
+assert turns[0]["parts"] == [("text", "화면을 볼게요"), ("tools", [("read", "shot.png")]), ("image", "BBBB"),
+                             ("text", "잘 보여요")], turns[0]["parts"]
+assert turns[1]["me"] == "이것도\n(이미지)" and turns[1]["imgs"] == ["AAAA"], turns[1]
+assert taskpet.tool_kind("mcp__claude-in-chrome__navigate", {})[0] == "browser"
+assert taskpet.tool_kind("ToolSearch", {})[0] is None
 assert taskpet.fmt_short(35) == "35초" and taskpet.fmt_short(200) == "3분" and taskpet.fmt_short(7300) == "2시간"
 # VS Code 세션은 자동 제목(ai-title)이 줄 제목이 된다 (패널에서 그 이름으로 찾음)
 with open(tp4, "a", encoding="utf-8") as f:
@@ -340,4 +427,32 @@ assert taskpet.Pet.viewed(pet, {"src": "codex", "title": "Join Moltbook"})
 assert not taskpet.Pet.viewed(pet, {"src": "chatgpt", "title": "작업 알림 로봇 소개"})
 pet.settings["hide_viewed"] = False
 assert not taskpet.Pet.viewed(pet, app_row)
+
+# 켜자마자 가장 최근 대화 1개: 가장 늦게 바뀐 기록 파일을 '완료' 줄로, 오래돼도 지우지 않음, 지웠으면 다시 안 띄움
+home = os.path.join(tmp, "claude-home")
+proj = os.path.join(home, "projects", "C--work")
+os.makedirs(os.path.join(proj, "new1"))
+for name, ago in (("old1", 9000), ("new1", 7200), ("agent-x", 10)):
+    p = os.path.join(proj, name + ".jsonl")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "cwd": "C:\\work", "entrypoint": "claude-desktop",
+                            "timestamp": iso(ago + 60), "message": {"content": "안녕 " + name}},
+                           ensure_ascii=False) + "\n")
+    os.utime(p, (time.time() - ago, time.time() - ago))
+with open(os.path.join(proj, "new1", "custom-title.json"), "w", encoding="utf-8") as f:
+    json.dump({"customTitle": "최근 세션"}, f, ensure_ascii=False)
+taskpet.CLAUDE_DIR = home
+tr3 = taskpet.Tracker(lambda kind, key: None)
+tr3.tasks, tr3.dismissed = {}, {}
+tr3.add_recent_claude()
+r = tr3.tasks.get("c:new1")
+assert r and r["status"] == "done" and r["recent"] and r["title"] == "최근 세션", tr3.tasks
+assert r["folder"] == "work" and r["entry"] == "claude-desktop" and r["start"] < r["end"]
+tr3.prune()
+assert "c:new1" in tr3.tasks                       # 2시간 전에 끝났어도 남김
+tr3.add_recent_claude()                            # 로봇을 다시 켜도 하나만
+assert list(tr3.tasks) == ["c:new1"]
+tr3.tasks, tr3.dismissed = {}, {"c:new1": time.time()}
+tr3.add_recent_claude()
+assert tr3.tasks == {}                             # 지운 뒤 새 일이 없으면 안 띄움
 print("통과", events)
