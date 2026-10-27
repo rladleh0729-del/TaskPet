@@ -11,6 +11,8 @@
 import base64
 import ctypes
 import glob
+import hashlib
+import io
 import json
 import math
 import os
@@ -34,7 +36,7 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 APP = "TaskPet"
-VERSION = "1.5.6"
+VERSION = "1.6.1"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -54,6 +56,7 @@ APP_DIR = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__
 EVENTS = os.path.join(APP_DIR, "events.jsonl")
 STATE = os.path.join(APP_DIR, "state.json")
 SETTINGS = os.path.join(APP_DIR, "settings.json")   # 로봇 위치, 소리 끄기
+DRAFTS = os.path.join(APP_DIR, "drafts.json")       # 세션마다 로봇에서 쓰던 글·붙인 이미지
 QUIT_FLAG = os.path.join(APP_DIR, "quit.flag")
 WEB_CMD = os.path.join(APP_DIR, "web-cmd.jsonl")   # 로봇 → 브라우저 확장 (탭 열기)
 # Claude 데스크톱은 MSIX 앱이라 그 안에서 실행된 훅이 쓰는 %LOCALAPPDATA% 는
@@ -94,6 +97,9 @@ T = {
     "autohide_ask": ("직접 정하기…", "Custom…"),
     "thinking": ("생각 중…", "Thinking…"),
     "older_hint": ("▲ 위로 올리면 이전 대화", "▲ Scroll up for older messages"),
+    "omitted": ("… 앞의 {n}개 생략", "… {n} earlier steps"),
+    "plan": ("계획", "Plan"),
+    "n_items": ("{n}개", "{n}"),
     "autohide_mine": ("직접: {d} 뒤", "custom: after {d}"),
     "autohide_prompt": ("몇 초 뒤에 말풍선을 숨길까요? (3 ~ 3600초)",
                         "Hide the bubble after how many seconds? (3–3600)"),
@@ -104,8 +110,10 @@ T = {
     "answer_in_app": ("여러 문항 질문이라 앱에서 답해 주세요", "Multi-question card: answer it in the app"),
     "img_hint": ("누르면 빼기", "click to remove"),
     "img_pick": ("이미지", "Images"),
+    "img_broken": ("(그림 열기 실패)", "(could not open image)"),
     "img_default": ("이 이미지를 봐 주세요.", "Please look at this image."),
     "reply_send": ("➤", "➤"),
+    "reply_hint": ("메시지 입력 · Shift+Enter 줄바꿈", "Message · Shift+Enter for new line"),
     "reply_sending": ("보내는 중…", "sending…"),
     "reply_fail": ("답을 보내지 못했습니다.\n{e}", "Could not send the answer.\n{e}"),
     "reply_nohelper": ("감시 프로그램이 꺼져 있어요", "The helper is not running"),
@@ -167,6 +175,9 @@ TEAL = "#3dd6c6"
 ANS_BG = "#fffaf3"        # 답변 칸: 거의 흰색에 주황을 살짝 섞음
 ANS_FG = "#1e1e1e"        # 답변 글자: 검은색
 ANS_HEAD = "#000000"
+HINT_FG = "#b9a08a"       # 빈 입력칸의 흐린 안내 글
+SELECT_BG = "#fde0c2"     # 입력칸에서 고른 글 (파랑 대신 옅은 주황)
+DONE_FG = "#1f9a4b"       # 끝난 줄: 제목·상태 글자 초록 (옅은 주황 바탕에서도 잘 보이게 조금 진하게)
 MY_BG = "#fbc98f"         # 내가 보낸 메시지 말풍선: 로봇 얼굴 같은 주황
 MY_FG = "#2a1608"
 CHIP_BG = "#f39a3f"       # 선택지 버튼: 로봇 주황 + 흰 글자
@@ -261,6 +272,149 @@ WEB_SRCS = tuple(src for src, _ in WEB_SITES.values())
 BROWSER_NAME = {"chrome": "Chrome", "brave": "Brave", "msedge": "Edge", "chromium": "Chromium",
                 "vivaldi": "Vivaldi", "opera": "Opera", "whale": "Whale"}
 FONT = "맑은 고딕" if KO else "Segoe UI"
+REPLY_FONT = (FONT, 10)   # 로봇 입력칸 글씨: Claude 글 칸과 같은 글씨체·크기
+
+
+class LOGFONTW(ctypes.Structure):
+    _fields_ = [("lfHeight", ctypes.c_long), ("lfWidth", ctypes.c_long), ("lfEscapement", ctypes.c_long),
+                ("lfOrientation", ctypes.c_long), ("lfWeight", ctypes.c_long), ("lfItalic", ctypes.c_ubyte),
+                ("lfUnderline", ctypes.c_ubyte), ("lfStrikeOut", ctypes.c_ubyte), ("lfCharSet", ctypes.c_ubyte),
+                ("lfOutPrecision", ctypes.c_ubyte), ("lfClipPrecision", ctypes.c_ubyte),
+                ("lfQuality", ctypes.c_ubyte), ("lfPitchAndFamily", ctypes.c_ubyte),
+                ("lfFaceName", ctypes.c_wchar * 32)]
+
+
+def ime_font(widget):
+    """한글을 조합하는 동안 입력기(IME)가 따로 그리는 글자를 이 칸과 같은 글씨체·크기로.
+    (안 하면 Windows 기본 글씨로 그려서 쓰는 중인 글자만 크게 보임)"""
+    try:
+        f = tkfont.Font(root=widget, font=widget.cget("font"))
+        size = f.actual("size")
+        lf = LOGFONTW()
+        lf.lfHeight = size if size < 0 else -round(size * widget.winfo_fpixels("1i") / 72)
+        lf.lfWeight = 400
+        lf.lfCharSet = 1                         # DEFAULT_CHARSET
+        lf.lfFaceName = f.actual("family")[:31]
+        imm = ctypes.windll.imm32
+        imm.ImmGetContext.restype = ctypes.c_void_p
+        imm.ImmGetContext.argtypes = [ctypes.c_void_p]
+        imm.ImmSetCompositionFontW.argtypes = [ctypes.c_void_p, ctypes.POINTER(LOGFONTW)]
+        imm.ImmReleaseContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        hwnd = widget.winfo_id()
+        himc = imm.ImmGetContext(hwnd)
+        if himc:
+            imm.ImmSetCompositionFontW(himc, ctypes.byref(lf))
+            imm.ImmReleaseContext(hwnd, himc)
+    except Exception:
+        pass
+
+
+class InlineIME:
+    """브라우저·구글 검색창처럼 한글을 글 칸 안에서 바로 조합해 보여 준다 (ㅎ → 하 → 한 이 칠 때마다 칸에).
+    Tk 8.6 은 조합 중인 글자를 입력기가 띄운 작은 따로 창에 맡겨서, 한 글자가 완성돼야 칸에 들어갔다.
+    키보드 포커스는 Tk 창 본체(Toplevel)가 받으므로 그 창의 입력기 신호를 가로채, 지금 커서가 있는
+    로봇 입력칸(attach 한 칸)에 조합 중인 글자를 밑줄 친 채로 넣었다가 완성되면 진짜 글로 바꾼다.
+    주의: 창 신호 안에서 Tk 를 부르면 파이썬·Tk 상태가 꼬여 프로그램이 죽는다(실제로 죽었음) →
+    신호 안에서는 글자만 받아 쌓아 두고, 칸에 넣는 건 Tk 타이머(15ms)와 키 바인딩에서 flush() 로."""
+    WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION = 0x0281, 0x010D
+    WM_IME_ENDCOMPOSITION, WM_IME_COMPOSITION = 0x010E, 0x010F
+    GCS_COMPSTR, GCS_RESULTSTR = 0x0008, 0x0800
+    ISC_SHOWUICOMPOSITIONWINDOW = 0x80000000
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_uint,
+                                 ctypes.c_size_t, ctypes.c_ssize_t)
+
+    def __init__(self, toplevel, on_input=None):
+        self.top, self.on_input = toplevel, on_input
+        u, imm = ctypes.windll.user32, ctypes.windll.imm32
+        u.SetWindowLongPtrW.restype = ctypes.c_void_p
+        u.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        u.CallWindowProcW.restype = ctypes.c_ssize_t
+        u.CallWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+                                      ctypes.c_size_t, ctypes.c_ssize_t]
+        imm.ImmGetContext.restype = ctypes.c_void_p
+        imm.ImmGetContext.argtypes = [ctypes.c_void_p]
+        imm.ImmReleaseContext.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        imm.ImmGetCompositionStringW.restype = ctypes.c_long
+        imm.ImmGetCompositionStringW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        self.u, self.imm = u, imm
+        self.target = None                       # 조합을 받을 글 칸 (그 칸의 FocusIn/FocusOut 이 정함)
+        self.queue = []                          # 창 신호에서 받아 둔 (완성 글 | None, 조합 중 글)
+        self._job = None
+        self.proc = self.WNDPROC(self.wndproc)   # (들고 있어야 사라지지 않음)
+        self.hwnd = toplevel.winfo_id()
+        self.old = u.SetWindowLongPtrW(self.hwnd, -4, ctypes.cast(self.proc, ctypes.c_void_p))   # GWLP_WNDPROC
+
+    def attach(self, w):
+        self.target = w
+        if self._job is None:
+            self.poll()
+
+    def detach(self, w):
+        if self.target is w:
+            self.flush()
+            self.target = None
+
+    def poll(self):
+        self.flush()
+        self._job = self.top.after(15, self.poll) if self.target is not None else None
+
+    def wndproc(self, hwnd, msg, wp, lp):
+        # (여기서는 Tk 를 부르지 않는다 — 위 주의)
+        try:
+            if msg == self.WM_IME_SETCONTEXT:    # 입력기의 조합 창은 띄우지 말라고 (글 칸에 직접 그림)
+                lp &= ~self.ISC_SHOWUICOMPOSITIONWINDOW
+            elif self.target is not None and msg in (self.WM_IME_STARTCOMPOSITION, self.WM_IME_COMPOSITION,
+                                                     self.WM_IME_ENDCOMPOSITION):
+                if msg == self.WM_IME_COMPOSITION:
+                    done = self.text(hwnd, self.GCS_RESULTSTR) if lp & self.GCS_RESULTSTR else None
+                    comp = self.text(hwnd, self.GCS_COMPSTR) if lp & self.GCS_COMPSTR else ""
+                    self.queue.append((done, comp))
+                elif msg == self.WM_IME_ENDCOMPOSITION:
+                    self.queue.append((None, ""))
+                return 0
+        except Exception:
+            pass
+        return self.u.CallWindowProcW(self.old, hwnd, msg, wp, lp)
+
+    def flush(self, *_):
+        """받아 둔 조합 글자를 칸에 넣는다 (Tk 타이머·키 바인딩에서 — 칠 키보다 먼저 처리되게)."""
+        w, got = self.target, bool(self.queue)
+        while self.queue:
+            done, comp = self.queue.pop(0)
+            if w is None:
+                continue
+            try:
+                self.preedit(w, "")
+                if done:
+                    w.insert("insert", done)
+                self.preedit(w, comp)
+                w.see("insert")
+            except tk.TclError:
+                pass
+        if got and self.on_input:
+            self.on_input()
+
+    def text(self, hwnd, flag):
+        himc = self.imm.ImmGetContext(hwnd)
+        if not himc:
+            return ""
+        try:
+            n = self.imm.ImmGetCompositionStringW(himc, flag, None, 0)
+            if n <= 0:
+                return ""
+            buf = ctypes.create_unicode_buffer(n // 2 + 1)
+            self.imm.ImmGetCompositionStringW(himc, flag, buf, n)
+            return buf.value[:n // 2]
+        finally:
+            self.imm.ImmReleaseContext(hwnd, himc)
+
+    @staticmethod
+    def preedit(w, s):
+        """조합 중인 글자: 커서 자리에 밑줄 친 채로 (다음 조합이 오면 바꿔 끼움)."""
+        if w.tag_ranges("ime"):
+            w.delete("ime.first", "ime.last")
+        if s:
+            w.insert("insert", s, ("ime",))
 
 # ---- 픽셀 로봇 (15 x 16) ----
 IDLE = [
@@ -1127,15 +1281,15 @@ def claude_last_answer(transcript):
         entry = rec.get("entrypoint") or entry
         if rec.get("type") == "ai-title":
             ai_title = str(rec.get("aiTitle") or "") or ai_title
+        said = user_said(rec)                    # 내가 보낸 글 (일하는 중에 끼워 보낸 글도)
+        if said:
+            question = said
         msg = rec.get("message")
         if rec.get("type") not in ("user", "assistant") or not isinstance(msg, dict):
             continue
         content = msg.get("content")
         if isinstance(content, str):
             content = [{"type": "text", "text": content}]
-        said = user_said(rec)                    # 내가 보낸 글
-        if said:
-            question = said
         for part in content if isinstance(content, list) else []:
             if not isinstance(part, dict):
                 continue
@@ -1150,28 +1304,62 @@ def claude_last_answer(transcript):
     return answer.strip()[:4000], entry, ai_title.strip()[:60], question.strip()[:1000]
 
 
+PASTED_TAG = re.compile(r"</?pasted_content[^>]*>")
+
+
 def user_said(rec):
     """기록 한 줄이 내가 보낸 메시지면 그 글, 아니면 None.
-    시스템이 덧붙인 꼬리표(<...>)·첨부 설명은 빼고, 이미지는 (이미지)로."""
-    if not isinstance(rec, dict) or rec.get("type") != "user" or rec.get("isMeta"):
+    Claude가 일하는 중에 끼워 보낸 글(queued_command)도 내 메시지. 붙여 넣은 글은 꼬리표만 걷고,
+    시스템이 넣은 글(<...>, 요약, 중단 표시, 첨부 설명)은 빼고, 이미지는 (이미지)로."""
+    if not isinstance(rec, dict) or rec.get("isMeta") or rec.get("isSidechain"):
         return None
-    msg = rec.get("message")
-    content = msg.get("content") if isinstance(msg, dict) else None
+    if rec.get("type") == "user" and not rec.get("isCompactSummary"):
+        msg = rec.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+    elif rec.get("type") == "attachment":
+        att = rec.get("attachment")
+        if not (isinstance(att, dict) and att.get("type") == "queued_command"
+                and att.get("commandMode", "prompt") == "prompt"):
+            return None
+        content = att.get("prompt")
+    else:
+        return None
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
     if not isinstance(content, list):
         return None
-    said = [str(p.get("text") or "").strip() for p in content
+    said = [PASTED_TAG.sub("", str(p.get("text") or "")).strip() for p in content
             if isinstance(p, dict) and p.get("type") == "text"]
-    said = [x for x in said if x and not x.startswith(("<", "[Image"))]
+    said = [x for x in said if x and not x.startswith(("<", "[Image", "[Request interrupted"))]
     if any(isinstance(p, dict) and p.get("type") == "image" for p in content):
         said.append("(이미지)")
     return "\n".join(said) if said else None
 
 
+def images_in(content):
+    """메시지·도구 결과 안의 그림들 (base64 글자들)."""
+    out = []
+    for p in content if isinstance(content, list) else []:
+        src = p.get("source") if isinstance(p, dict) and p.get("type") == "image" else None
+        if isinstance(src, dict) and src.get("type") == "base64" and src.get("data"):
+            out.append(str(src["data"]))
+    return out
+
+
+def rec_images(rec):
+    """내가 보낸 메시지(끼워 보낸 글 포함)에 붙인 그림들."""
+    if rec.get("type") == "attachment":
+        return images_in((rec.get("attachment") or {}).get("prompt"))
+    msg = rec.get("message")
+    return images_in(msg.get("content") if isinstance(msg, dict) else None)
+
+
 def claude_turns(transcript, tail_bytes=1_500_000):
-    """대화를 차례대로: [{"me": 내 메시지, "ai": [Claude가 쓴 글들]}, ...] (끝에서 tail_bytes 만큼만 읽음).
-    돌려주는 값: (대화 목록, 앞에 더 있는지). 위로 스크롤하면 tail_bytes 를 늘려 다시 부른다."""
+    """대화를 차례대로 (끝에서 tail_bytes 만큼만 읽음). 위로 스크롤하면 tail_bytes 를 늘려 다시 부른다.
+    돌려주는 값: (대화 목록, 앞에 더 있는지). 대화 하나 =
+      {"me": 내 메시지, "imgs": 내가 붙인 그림들(base64), "t0": 보낸 시각, "ai": [Claude 글들],
+       "parts": [("text", 글) | ("tools", [(종류, 대상)…]) | ("image", base64)…] (나온 차례대로),
+       "open": 결과가 아직 안 온 마지막 도구 (종류, 대상) 또는 None}"""
     try:
         size = os.path.getsize(transcript)
         with open(transcript, "rb") as f:
@@ -1184,6 +1372,13 @@ def claude_turns(transcript, tail_bytes=1_500_000):
     if more and lines:
         lines = lines[1:]                        # 잘린 첫 줄
     turns, cur = [], None
+    results, last_tool = set(), None             # 결과가 온 도구들, 마지막으로 부른 도구
+
+    def new_turn(me, ts, imgs=()):
+        turn = {"me": me, "t0": ts, "imgs": list(imgs), "ai": [], "parts": [], "open": None}
+        turns.append(turn)
+        return turn
+
     for line in lines:
         try:
             rec = json.loads(line)
@@ -1191,19 +1386,213 @@ def claude_turns(transcript, tail_bytes=1_500_000):
             continue
         said = user_said(rec)
         if said:
-            cur = {"me": said, "ai": []}
-            turns.append(cur)
+            cur = new_turn(said, rec_time(rec), rec_images(rec))
             continue
-        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+        if not isinstance(rec, dict) or rec.get("isSidechain"):
             continue
         msg = rec.get("message")
-        for part in (msg.get("content") if isinstance(msg, dict) else None) or []:
-            if isinstance(part, dict) and part.get("type") == "text" and str(part.get("text") or "").strip():
-                if cur is None:                  # 잘린 앞부분의 답
-                    cur = {"me": "", "ai": []}
-                    turns.append(cur)
-                cur["ai"].append(str(part["text"]).strip())
+        content = (msg.get("content") if isinstance(msg, dict) else None) or []
+        if rec.get("type") == "user":
+            for part in content if isinstance(content, list) else []:
+                if isinstance(part, dict) and part.get("type") == "tool_result":
+                    results.add(part.get("tool_use_id"))
+                    if cur is not None:          # 도구가 돌려준 그림 (예: 이미지 파일 읽기) → 그 자리에 작게
+                        cur["parts"] += [("image", b) for b in images_in(part.get("content"))]
+            continue
+        if rec.get("type") != "assistant" or not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            kind = part.get("type")
+            if kind not in ("text", "tool_use", "thinking"):
+                continue
+            # 긴 작업 중 Claude 앱이 보여 주는 진행 안내 글은 '생각' 칸(thinking)에 글로 남는 일이 많다
+            # (내용 없는 thinking 은 숨긴 생각이라 건너뜀)
+            text = str(part.get("text" if kind == "text" else "thinking") or "").strip()
+            if kind == "thinking":
+                if not text:
+                    continue
+                kind = "text"
+            if kind == "text" and not text:
+                continue
+            if cur is None:                      # 잘린 앞부분의 답
+                cur = new_turn("", rec_time(rec))
+            if kind == "text":
+                cur["ai"].append(text)
+                if cur["parts"] and cur["parts"][-1][0] == "text":
+                    cur["parts"][-1] = ("text", cur["parts"][-1][1] + "\n\n" + text)
+                else:
+                    cur["parts"].append(("text", text))
+                last_tool = None
+                continue
+            name, inp = str(part.get("name") or ""), part.get("input")
+            what = tool_kind(name, inp if isinstance(inp, dict) else {})
+            last_tool = (what, part.get("id"))
+            if what[0] is None:
+                continue
+            if cur["parts"] and cur["parts"][-1][0] == "tools":
+                cur["parts"][-1][1].append(what)
+            else:
+                cur["parts"].append(("tools", [what]))
+    if cur is not None and last_tool and last_tool[0][0] and last_tool[1] not in results:
+        cur["open"] = last_tool[0]               # 지금 하고 있는 일 (결과가 아직 안 옴)
     return turns, more
+
+
+_PLAN_CACHE = {}   # 기록 파일 → (읽은 위치, 계획 목록, 계획이 마지막으로 바뀐 시각)
+
+
+def claude_plan(transcript):
+    """지금 계획 목록과 마지막으로 바뀐 시각: (계획 | None, 시각).
+    계획은 한참 전에 만들어졌을 수 있어 기록 파일 전체에서 계획 도구만 골라 차례로 적용한다.
+    처음 한 번만 끝까지 읽고, 그다음부터는 새로 붙은 부분만 읽는다."""
+    off, plan, changed = _PLAN_CACHE.get(transcript, (0, None, 0.0))
+    try:
+        size = os.path.getsize(transcript)
+        if size < off:                           # 파일이 줄었으면 처음부터
+            off, plan, changed = 0, None, 0.0
+        with open(transcript, "rb") as f:
+            f.seek(off)
+            data = f.read()
+    except OSError:
+        return plan, changed
+    end = data.rfind(b"\n") + 1
+    for line in data[:end].splitlines():
+        if b"update_plan" not in line and b"TodoWrite" not in line and b"wrap_up" not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "assistant" or rec.get("isSidechain"):
+            continue
+        for part in (rec.get("message") or {}).get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "tool_use":
+                inp = part.get("input")
+                new = plan_step(plan, str(part.get("name") or ""), inp if isinstance(inp, dict) else {})
+                if new is not None:
+                    plan, changed = new, rec_time(rec)
+    _PLAN_CACHE[transcript] = (off + end, plan, changed)
+    return plan, changed
+
+
+def rec_time(rec):
+    """기록 한 줄의 시각 (초). 없으면 0."""
+    try:
+        return datetime.fromisoformat(str(rec.get("timestamp")).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def tool_kind(name, inp):
+    """도구 이름·입력 → (종류, 대상). 종류 None 은 보여 주지 않는 도구 (계획·도구 찾기·마무리 등)."""
+    def base(p):
+        return os.path.basename(str(p).replace("/", "\\").rstrip("\\")) if p else ""
+    if name in ("Read", "NotebookRead"):
+        return "read", base(inp.get("file_path") or inp.get("notebook_path"))
+    if name in ("Edit", "MultiEdit", "NotebookEdit"):
+        return "edit", base(inp.get("file_path") or inp.get("notebook_path"))
+    if name == "Write":
+        return "write", base(inp.get("file_path"))
+    if name in ("Grep", "Glob"):
+        return "search", str(inp.get("pattern") or "")[:30]
+    if name in ("Bash", "PowerShell"):
+        return "run", str(inp.get("description") or "")[:40]
+    if name == "WebSearch":
+        return "web", str(inp.get("query") or "")[:30]
+    if name == "WebFetch":
+        return "web", re.sub(r"^https?://(www\.)?", "", str(inp.get("url") or "")).split("/")[0][:30]
+    if name in ("Agent", "Task"):
+        return "agent", str(inp.get("description") or "")[:30]
+    if name == "AskUserQuestion":
+        return "ask", ""
+    if "claude-in-chrome" in name or "Claude_Browser" in name:
+        return "browser", ""
+    short = name.split("__")[-1]
+    if (short in ("update_plan", "wrap_up", "TodoWrite", "ToolSearch")
+            or name.startswith(("mcp__ccd_", "Task"))):
+        return None, ""
+    return "tool", short[:24]
+
+
+# 도구 종류 → (하는 중, 한 뒤) 글. Claude 앱처럼 '읽는 중 taskpet.py' / '읽음 taskpet.py · 편집함 2개'
+TOOL_WORDS = {
+    "read": (("읽는 중", "읽음"), ("Reading", "Read")),
+    "edit": (("편집 중", "편집함"), ("Editing", "Edited")),
+    "write": (("만드는 중", "만듦"), ("Writing", "Wrote")),
+    "search": (("검색 중", "검색함"), ("Searching", "Searched")),
+    "run": (("명령 실행 중", "명령 실행"), ("Running", "Ran")),
+    "web": (("웹 보는 중", "웹 봄"), ("Browsing web", "Web")),
+    "agent": (("에이전트 실행 중", "에이전트"), ("Running agent", "Agent")),
+    "ask": (("질문하는 중", "질문함"), ("Asking", "Asked")),
+    "browser": (("브라우저 쓰는 중", "브라우저"), ("Using browser", "Browser")),
+    "tool": (("도구 쓰는 중", "도구"), ("Using tool", "Tool")),
+}
+
+
+def tool_doing(what):
+    """지금 하는 일 한 줄: '읽는 중 taskpet.py'."""
+    kind, target = what
+    word = TOOL_WORDS.get(kind, TOOL_WORDS["tool"])[0 if KO else 1][0]
+    return f"{word} {target}".strip()
+
+
+def tools_summary(tools):
+    """한 묶음의 도구들을 한 줄로: '읽음 taskpet.py · 편집함 2개 · 명령 실행 3개' (나온 차례대로)."""
+    groups = {}
+    for kind, target in tools:
+        groups.setdefault(kind, []).append(target)
+    out = []
+    for kind, targets in groups.items():
+        word = TOOL_WORDS.get(kind, TOOL_WORDS["tool"])[0 if KO else 1][1]
+        uniq = list(dict.fromkeys(x for x in targets if x))
+        if kind in ("read", "edit", "write") and len(uniq) == 1:
+            out.append(f"{word} {uniq[0]}")       # 파일 하나면 이름 (같은 파일을 여러 번이어도)
+        else:
+            out.append(f"{word} {t('n_items', n=len(targets))}")
+    return " · ".join(out)
+
+
+def plan_step(plan, name, inp):
+    """계획 도구(update_plan·TodoWrite·wrap_up)면 바뀐 계획 목록 [{"content","status"}…], 아니면 None."""
+    short = name.split("__")[-1]
+    if short == "TodoWrite":
+        items = inp.get("todos")
+    elif short == "update_plan":
+        items = inp.get("items")
+    elif short == "wrap_up":                     # 마무리하면 남은 단계도 모두 끝남
+        return [dict(x, status="completed") for x in plan] if plan else None
+    else:
+        return None
+    if isinstance(items, list):
+        return [{"content": str(x.get("content") or "")[:80], "status": str(x.get("status") or "pending")}
+                for x in items if isinstance(x, dict)]
+    if not plan:
+        return None
+    plan = [dict(x) for x in plan]
+    if inp.get("advance"):                       # 하던 단계 끝, 다음 단계 시작
+        for i, x in enumerate(plan):
+            if x["status"] == "in_progress":
+                x["status"] = "completed"
+                nxt = next((y for y in plan[i + 1:] if y["status"] == "pending"), None)
+                if nxt:
+                    nxt["status"] = "in_progress"
+                break
+        else:
+            nxt = next((y for y in plan if y["status"] == "pending"), None)
+            if nxt:
+                nxt["status"] = "in_progress"
+    for n in inp.get("done") or []:
+        if isinstance(n, int) and 1 <= n <= len(plan):
+            plan[n - 1]["status"] = "completed"
+    n = inp.get("start")
+    if isinstance(n, int) and 1 <= n <= len(plan):
+        for x in plan:
+            if x["status"] == "in_progress":
+                x["status"] = "completed"
+        plan[n - 1]["status"] = "in_progress"
+    return plan
 
 
 def claude_pending_card(transcript):
@@ -1295,10 +1684,52 @@ class Tracker:
         now = time.time()
         for k in list(self.tasks):
             e = self.tasks[k]
+            if e.get("recent"):                  # 켤 때 띄운 최근 대화는 지우거나 새 일이 올 때까지 둔다
+                continue
             if (now - e.get("start", now) > 12 * 3600
                     or (e.get("status") == "done" and now - e.get("end", now) > 3600)):
                 del self.tasks[k]
                 self.dirty = True
+
+    def add_recent_claude(self):
+        """켜자마자 가장 최근 Claude Code 대화 1개를 '완료' 줄로 띄운다 — 컴퓨터를 다시 켠 뒤에도
+        로봇에서 바로 대화를 보고 이어서 보낼 수 있게. 이미 Claude 줄이 있으면(로봇만 다시 켬) 그대로 둔다."""
+        for k in [k for k, e in self.tasks.items() if e.get("recent")]:
+            del self.tasks[k]                    # 지난번에 띄운 것은 치우고 지금 가장 최근 것으로
+        if any(e.get("src") == "claude" for e in self.tasks.values()):
+            return
+        files = [p for p in glob.glob(os.path.join(CLAUDE_DIR, "projects", "*", "*.jsonl"))
+                 if not os.path.basename(p).startswith("agent-")]   # 에이전트(곁가지) 기록은 빼고
+        try:
+            tp = max(files, key=os.path.getmtime)
+            mtime = os.path.getmtime(tp)
+        except (ValueError, OSError):
+            return
+        sid = os.path.splitext(os.path.basename(tp))[0]
+        key = "c:" + sid
+        if self.dismissed.get(key, 0) >= mtime:  # 지운 뒤로 새 일이 없으면 다시 띄우지 않음
+            return
+        cwd = ""
+        try:
+            with open(tp, "rb") as f:
+                f.seek(max(0, os.path.getsize(tp) - 200_000))
+                for line in reversed(f.read().splitlines()):
+                    if b'"cwd"' in line:
+                        cwd = str(json.loads(line).get("cwd") or "")
+                        break
+        except (OSError, ValueError):
+            pass
+        turns, _ = claude_turns(tp, 600_000)
+        t0 = turns[-1]["t0"] if turns and turns[-1]["t0"] else mtime
+        e = {"src": "claude", "id": sid, "prompt": "", "transcript": tp,
+             "title": claude_title({"transcript_path": tp, "session_id": sid}),
+             "folder": os.path.basename(cwd) or "Claude",
+             "start": min(t0, mtime), "end": mtime, "status": "done", "recent": True}
+        self.note_answer(e, tp)
+        if not e["title"]:                       # 이름 없는 세션은 내 마지막 메시지 앞부분으로
+            e["prompt"] = (e.get("asked") or "").split("\n")[0][:40]
+        self.tasks[key] = e
+        self.dirty = True
 
     def poll(self):
         self.read_claude_events()
@@ -1849,20 +2280,30 @@ class Pet:
         self.happy_until = 0.0
         self.hidden = False
         self._press = None
-        self._last_click = ("", 0.0)
+        self._last_click = ("", 0.0, 0)   # 마지막으로 누른 줄, 그때 시각, 클릭 신호 번호
         self._bub_sig = None
         self._pos_sig = None
         self._infos = []
         self._icons = {}
         self._bot = {}                # 로봇 그림 (표정·팔 모양별로 한 번만 그림)
         self._hist = {}               # 대화 기록창 상태 (어느 세션·몇 개·읽던 자리)
+        self._chat = None             # 지금 그려진 대화 기록창 (칸들)
+        self._typed_at = 0.0          # 입력칸에 마지막으로 글자를 친 때
         self._rounds = {}             # 둥근 바탕 그림 (크기·색별로 한 번만 그림)
-        self._picking = False         # 📎 파일 고르는 창이 떠 있는 동안
         self.detail = None            # › 로 펼친 상세 카드의 줄 (없으면 목록)
         self.reply_imgs = []          # 답장에 붙인 이미지 파일들
         self.prev_fg = 0              # 로봇 입력칸을 열기 전에 쓰던 창
         self.reply_key = None         # 답을 보내는 중인 줄
         self.reply_var = tk.StringVar(self.root)
+        # 쓰던 글은 세션마다 기억해 파일에도 둔다 (밖을 눌러 카드가 닫히거나 로봇을 다시 켜도 그대로)
+        self.drafts = read_json(DRAFTS, {})
+        self._draft_key = None        # 지금 입력칸이 어느 세션 글인지
+        self._want_focus = False      # 사용자가 카드를 열었으니 입력칸에 커서를 줄지
+        self._refocus = None          # 카드를 다시 만들기 전 입력칸 커서 자리 (커서가 있었을 때만)
+        self._input_extra = 0         # 입력칸이 한 줄보다 늘어난 높이 (그만큼 기록창을 줄임)
+        self._thumb_cache = {}        # 대화 속 그림 작은 사진 (그림 이름 → 사진)
+        self._img_data = {}           # 지금 기록창에 있는 그림들 (이름 → base64)
+        self.reply_var.trace_add("write", lambda *a: self.save_draft())
         # 화면에 보이는 앱("claude"·"code"·"chatgpt")들, Claude 앱에 띄워 둔 세션 제목, ChatGPT 앱에 띄워 둔 대화 제목
         self.seen = ((), "", "")
         self.shown_at = time.time()   # 말풍선이 (다시) 보이기 시작한 때 — 자동 숨김 기준
@@ -1881,9 +2322,16 @@ class Pet:
         self.bub_box = tk.Frame(self.bub_c, bg=INNER)
         self.bub_c.create_window(0, 0, window=self.bub_box, anchor="nw",
                                  tags="boxwin")
+        self.bubble.bind("<MouseWheel>", self.chat_wheel)   # 말풍선 어디서든 휠 → 대화 기록창
+        try:                          # 한글을 입력칸 안에서 바로 조합 (안 되면 Tk 기본 방식)
+            self.ime = InlineIME(self.bubble, lambda: setattr(self, "_typed_at", time.time()))
+        except Exception:
+            self.ime = None
+        self.bubble.bind("<Button-1>", self.bubble_click, add="+")
         self.bubble.withdraw()
 
         self.tracker = Tracker(self.on_event)
+        self.tracker.add_recent_claude()          # 켜자마자 가장 최근 대화 1개
         self.updater = Updater()
         self.ext_tip = None               # 확장 설치 권유 줄을 둘지 (검사 결과, 다른 스레드가 채움)
         self.next_ext_check = time.time() + 30
@@ -2005,19 +2453,22 @@ class Pet:
             self.update_bubble(force=True)
 
     def follow_progress(self):
-        """펼친 카드의 대화 기록이 바뀌면(새 글·새 답) 2초 안에 다시 그린다 — 일하는 중 글도 실시간으로."""
+        """펼친 카드의 대화 기록이 바뀌면(새 글·새 답) 1초 안에 기록창만 고쳐 그린다 — 일하는 중 글도 실시간으로.
+        카드 전체를 다시 만들지 않으므로 입력칸에 쓰던 글이 끊기지 않는다."""
+        ch = self._chat
         e = self.tracker.tasks.get(self.detail) if self.detail else None
-        if not e or e.get("src") != "claude" or not e.get("transcript"):
+        if not ch or not e or not e.get("transcript"):
             return
-        if time.time() - getattr(self, "_live_at", 0) < 2:
+        if time.time() - getattr(self, "_live_at", 0) < 1:
             return
         self._live_at = time.time()
+        self.tick_status()
         try:
-            mtime = os.path.getmtime(e["transcript"])
-        except OSError:
-            return
-        if self._hist.get("key") == self.detail and mtime != self._hist.get("mtime"):
-            self.update_bubble(force=True)
+            if self.read_chat(e) or (e.get("status") == "working") != ch["working"]:
+                self.fill_chat(e)
+                self.position_bubble()
+        except tk.TclError:                      # 그사이 카드가 닫혔으면 그만
+            self._chat = None
 
     def set_setting(self, key, value):
         self.save_setting(key, value)
@@ -2110,16 +2561,54 @@ class Pet:
         self.tracker.dirty = True
         self.update_bubble(force=True)
 
-    def row_click(self, key):
+    CLICK_WAIT_MS = 400      # 한 번 클릭인지 더블 클릭인지 기다리는 시간 (사용자 지정: 보통 0.5초보다 조금 짧게)
+
+    def row_click(self, key, ev=None):
+        """한 번 클릭 = 펼치기(› 와 같음), 더블 클릭 = 그 대화 창 열기 (펼치지 않고).
+        첫 클릭 뒤 잠깐(0.26초) 두 번째 클릭을 기다렸다가 펼친다. 느린 더블 클릭이라 이미 펼쳐졌으면
+        두 번째 클릭(펼친 카드 위)은 bubble_click 이 받아 창을 열고 목록으로 되돌린다."""
         now = time.time()
-        last, when = self._last_click
-        if key == last and now - when < 0.5:
-            self._last_click = ("", 0.0)
+        last, when, _ = self._last_click
+        e = self.tracker.tasks.get(key)
+        if getattr(self, "_click_job", None):
+            self.root.after_cancel(self._click_job)
+            self._click_job = None
+        if key == last and now - when < self.dbl_sec():
+            self._last_click = ("", 0.0, 0)
+            if e:
+                open_task(key, e)
+            return
+        self._last_click = (key, now, getattr(ev, "time", 0))
+        if e and self.has_detail(e):
+            self._click_job = self.root.after(self.CLICK_WAIT_MS, lambda: self.click_open(key))
+
+    def click_open(self, key):
+        self._click_job = None
+        if self.detail is None and key in self.tracker.tasks:
+            self.open_detail(key)
+
+    def title_open(self, key, e):
+        self._last_click = ("", 0.0, 0)          # bubble_click 이 한 번 더 열지 않게
+        open_task(key, e)
+
+    def bubble_click(self, ev):
+        """줄을 눌러 펼친 직후 같은 자리를 한 번 더 눌렀으면(= 더블 클릭) 그 대화 창을 연다."""
+        key, when, stamp = self._last_click
+        if (key and self.detail == key and ev.time != stamp
+                and time.time() - when < self.dbl_sec()):
+            self._last_click = ("", 0.0, 0)
             e = self.tracker.tasks.get(key)
             if e:
                 open_task(key, e)
-        else:
-            self._last_click = (key, now)
+            self.root.after(10, self.close_detail)   # 창을 열려던 것이니 펼친 카드는 접는다
+
+    @staticmethod
+    def dbl_sec():
+        """윈도우 더블 클릭 시간 (초)."""
+        try:
+            return max(200, min(900, int(ctypes.windll.user32.GetDoubleClickTime()))) / 1000
+        except Exception:
+            return 0.5
 
     # ---- 반복 ----
     def tick(self):
@@ -2134,7 +2623,8 @@ class Pet:
                 seen = (tuple(rep.get("seen") or ()), rep.get("seen_session", ""), rep.get("seen_gpt", ""))
                 if seen != self.seen:
                     self.seen = seen
-                    self.update_bubble(force=True)
+                    # 펼친 카드는 보이는 창과 상관없으니 통째로 다시 만들지 않는다 (입력칸이 끊기지 않게)
+                    self.update_bubble(force=not self.detail)
             self.auto_hide()
             self.follow_progress()
             res = GPT.take_reply() if GPT else None
@@ -2189,7 +2679,8 @@ class Pet:
             # 진행 중인 것이 모두 같은 색이면 그 색, 섞여 있으면 기본 주황
             colors = {SRC_COLOR.get(s, ACCENT) for s in srcs}
             badge = (colors.pop() if len(colors) == 1 else ACCENT, str(n))
-        # 끝남은 로봇 가슴·안테나 색으로 보이므로 따로 배지를 달지 않는다
+        elif "done" in st:                       # 다 끝났으면 초록 ✓
+            badge = (GREEN, "✓")
         if badge:                                # 머리 오른쪽 위 모서리에 붙여 단다
             d = S(16)
             x = self.pad_x + int(15 * self.px * 0.84)
@@ -2230,7 +2721,7 @@ class Pet:
     @staticmethod
     def info_color(e):
         st = e.get("status")
-        return TXT_RED if st == "waiting" else WORKING if st == "working" else SUB
+        return TXT_RED if st == "waiting" else WORKING if st == "working" else DONE_FG if st == "done" else SUB
 
     def can_send(self, e):
         """로봇에서 글을 보낼 수 있는 줄 (Claude 앱·VS Code 세션, 답하는 중에도)."""
@@ -2239,36 +2730,50 @@ class Pet:
                 and e.get("status") in ("done", "working", "waiting"))
 
     def has_detail(self, e):
-        """› 로 펼칠 내용이 있는 줄 (답변·질문·보내기)."""
+        """› 로 펼칠 내용이 있는 줄 (대화 기록·질문·보내기)."""
         if e.get("src") != "claude":
             return False
-        return bool((e.get("answer") and self.settings.get("answer_preview", True))
+        return bool(e.get("transcript") or (e.get("answer") and self.settings.get("answer_preview", True))
                     or e.get("ask") or self.can_send(e))
 
     # ---- 둥근 모양 (Tk 칸은 네모라서, 매끈한 둥근 바탕 그림을 깔고 그 위에 글자를 올린다) ----
-    def round_photo(self, w, h, fill, outline=None, ow=0, r=None, under=INNER):
+    def round_photo(self, w, h, fill, outline=None, ow=0, r=None, under=INNER, keep=True):
+        """둥근 바탕 그림. keep=False 면 모아 두지 않는다 (크기가 매번 다른 대화 칸 — 부른 쪽이 들고 있어야 함)."""
         key = (w, h, fill, outline, ow, r, under)
-        if key not in self._rounds:
-            k = 4
-            img = Image.new("RGB", (w * k, h * k), under)
-            ImageDraw.Draw(img).rounded_rectangle(
-                [0, 0, w * k - 1, h * k - 1], radius=(r if r is not None else h // 2) * k,
-                fill=fill, outline=outline, width=ow * k)
-            self._rounds[key] = ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
-        return self._rounds[key]
+        if key in self._rounds:
+            return self._rounds[key]
+        k = 4
+        r = r if r is not None else h // 2
+        cap = r + 2                              # 위·아래 둥근 부분 높이
+        hh = h if h <= cap * 2 + 2 else cap * 2 + 2
+        img = Image.new("RGB", (w * k, hh * k), under)
+        ImageDraw.Draw(img).rounded_rectangle(
+            [0, 0, w * k - 1, hh * k - 1], radius=r * k, fill=fill, outline=outline, width=ow * k)
+        img = img.resize((w, hh), Image.LANCZOS)
+        if hh < h:
+            # 긴 칸(긴 답변)은 4배 그림이 너무 커지므로 위·아래 둥근 부분만 그리고 가운데는 곧은 줄을 늘인다
+            full = Image.new("RGB", (w, h), under)
+            full.paste(img.crop((0, 0, w, cap)), (0, 0))
+            full.paste(img.crop((0, cap, w, cap + 1)).resize((w, h - cap * 2)), (0, cap))
+            full.paste(img.crop((0, hh - cap, w, hh)), (0, h - cap))
+            img = full
+        photo = ImageTk.PhotoImage(img)
+        if keep:
+            self._rounds[key] = photo
+        return photo
 
-    def round_label(self, parent, text, fill, fg, size=8, padx=7, pady=3, width=None, hover=None):
-        """알약 모양 글자 칸. hover=(바탕, 글자) 면 마우스를 올렸을 때 그 색으로."""
+    def round_label(self, parent, text, fill, fg, size=8, padx=7, pady=3, width=None, hover=None, under=INNER):
+        """알약 모양 글자 칸. hover=(바탕, 글자) 면 마우스를 올렸을 때 그 색으로. under = 둘레 바탕색."""
         font = (FONT, size, "bold")
         f = tkfont.Font(root=self.root, font=font)
         w = width or f.measure(text) + S(padx) * 2
         h = f.metrics("linespace") + S(pady) * 2
-        img = self.round_photo(w, h, fill)
-        lb = tk.Label(parent, text=text, image=img, compound="center", bg=INNER, fg=fg, font=font,
+        img = self.round_photo(w, h, fill, under=under)
+        lb = tk.Label(parent, text=text, image=img, compound="center", bg=under, fg=fg, font=font,
                       bd=0, padx=0, pady=0, highlightthickness=0)
         lb.pill = True                           # 줄에 마우스를 올려도 바탕 그대로
         if hover:
-            on = self.round_photo(w, h, hover[0])
+            on = self.round_photo(w, h, hover[0], under=under)
             lb.bind("<Enter>", lambda ev: lb.configure(image=on, fg=hover[1]), add="+")
             lb.bind("<Leave>", lambda ev: lb.configure(image=img, fg=fg), add="+")
             lb.configure(cursor="hand2")
@@ -2297,14 +2802,19 @@ class Pet:
         now = time.time()
         if self.detail:
             e = self.tracker.tasks[self.detail]
-            sig = ("detail", self.detail, e.get("status"), e.get("title", ""),
-                   e.get("answer", "")[-80:], e.get("ask", ""),
+            # (마지막 답변 글은 넣지 않는다: 대화는 기록창이 따로 읽고, 보낸 직후 답변 칸이 비었다가 다시 채워지며
+            #  카드가 두 번 다시 만들어져 그사이 쓰던 한글이 끊겼음)
+            sig = ("detail", self.detail, e.get("status"), e.get("title", ""), e.get("ask", ""),
                    tuple(c["label"] for c in e.get("choices") or []),
                    bool(e.get("sending")), tuple(self.reply_imgs))
         else:
             sig = ("list", len(items) > 8, tuple(
-                (k, e.get("status"), e.get("title", ""), e.get("prompt", ""), self.has_detail(e))
+                (k, e.get("status"), e.get("title", ""), e.get("prompt", ""), self.has_detail(e),
+                 bool(self.drafts.get(k)))
                 for k, e in items[:8]))
+        if not force and self.detail and sig != self._bub_sig and self.typing():
+            self.ui_log("다시 만들기 미룸", sig, self._bub_sig)
+            sig = self._bub_sig      # 입력칸에 글을 쓰는 중이면 카드를 다시 만들지 않는다 (한글 조합이 끊기지 않게)
         if not force and sig == self._bub_sig:
             for k, lbl in self._infos:     # 시간 글자만 바꿔 깜빡임 방지
                 e = self.tracker.tasks.get(k)
@@ -2312,15 +2822,25 @@ class Pet:
                     lbl.configure(text=self.info_text(e, now, short=lbl.short))
             self.show_bubble()
             return
+        if self.detail and self.entry_focused():
+            self.ui_log("입력 중 다시 만듦", "force" if force else "", sig, self._bub_sig)
         self._bub_sig = sig
         self._infos = []
         self.save_chat_state()
-        for w in self.bub_box.winfo_children():
-            w.destroy()
+        # 입력칸에 커서가 있었으면 새 입력칸에 그 자리 그대로 돌려준다 (아니면 포커스를 뺏지 않음)
+        ent = self.entry_focused()
+        self._refocus = ent.index("insert") if ent else None
+        # 새 내용은 아직 화면에 안 붙인 칸에 다 만든 뒤, 말풍선 크기·모양을 맞추고 한 번에 바꿔 끼운다
+        # (만드는 도중의 모습 — 펼칠 때 제목 한 줄만 있는 말풍선 — 이 잠깐 보이지 않게)
+        old, self.bub_box = self.bub_box, tk.Frame(self.bub_c, bg=INNER)
         if self.detail:
             self.build_detail(self.detail, self.tracker.tasks[self.detail], now)
         else:
             self.build_list(items, now)
+        self.position_bubble()                   # (크기 계산은 이 안에서 한 번)
+        self.bub_c.itemconfigure("boxwin", window=self.bub_box)
+        self.bub_c.tag_raise("boxwin")
+        old.destroy()
         self.show_bubble()
 
     # ---- 목록: 줄마다 한 줄 (아이콘 · 제목 · 이름표 · 짧은 상태 · › · ✕) ----
@@ -2331,18 +2851,23 @@ class Pet:
                 tk.Frame(self.bub_box, bg=LINE, height=1).pack(fill="x", padx=S(2))
             row = tk.Frame(self.bub_box, bg=INNER)
             row.pack(fill="x", padx=S(2), pady=S(3))
-            # 답을 기다리는 줄은 맨 앞 빨간 점으로 알린다 (제목 색은 그대로, 다른 줄은 빈자리)
-            bar = tk.Label(row, text="●" if status == "waiting" else " ", bg=INNER, fg=TXT_RED,
-                           font=(FONT, 7), width=1)
+            # 맨 앞 칸: 답을 기다리면 빨간 ●, 끝났으면 초록 ✓ (끝난 줄은 제목·상태도 초록)
+            mark, mark_fg = {"waiting": ("●", TXT_RED), "done": ("✓", DONE_FG)}.get(status, (" ", FG))
+            bar = tk.Label(row, text=mark, bg=INNER, fg=mark_fg,
+                           font=(FONT, 8 if status == "done" else 7, "bold"), width=1)
             bar.pack(side="left", padx=(0, S(2)))
             name = e.get("title") or e.get("prompt") or e.get("folder", "?")
             if len(name) > 24:
                 name = name[:23] + "…"
             head = tk.Label(row, text=" " + name, image=self.icon(e.get("src")), compound="left",
-                            bg=INNER, fg=FG, font=(FONT, 9, "bold"))
+                            bg=INNER, fg=DONE_FG if status == "done" else FG, font=(FONT, 9, "bold"))
             head.hl = True                       # 마우스를 올리면 이 글자 색이 바뀜
+            head.base = DONE_FG if status == "done" else FG
             head.pack(side="left")
             self.pill_label(row, e).pack(side="left", padx=(S(6), 0))
+            if self.drafts.get(key):             # 로봇에서 쓰다 만 글이 있으면 ✎
+                tk.Label(row, text="✎", bg=INNER, fg=WORKING, font=(FONT, 9, "bold")).pack(
+                    side="left", padx=(S(4), 0))
             info = tk.Label(row, text=self.info_text(e, now, short=True), bg=INNER,
                             fg=self.info_color(e),
                             font=(FONT, 8, "bold" if status == "waiting" else "normal"))
@@ -2361,7 +2886,7 @@ class Pet:
                 more.bind("<Button-1>", lambda ev, k=key: self.open_detail(k))
                 parts.append(more)
             for w in (row, bar, head, info):
-                w.bind("<Button-1>", lambda ev, k=key: self.row_click(k))
+                w.bind("<Button-1>", lambda ev, k=key: self.row_click(k, ev))
                 w.configure(cursor="hand2")
             # 마우스를 올린 줄은 배경을 살짝 밝게 (더블 클릭할 줄이 어느 것인지 보이게)
             for w in parts:
@@ -2374,6 +2899,7 @@ class Pet:
     # ---- 상세 카드: › 를 누른 줄 하나만 (답변 · 질문 · 보내기) ----
     def build_detail(self, key, e, now):
         status = e.get("status")
+        self._input_extra = 0                    # (입력칸을 만들 때 다시 정해짐)
         card = tk.Frame(self.bub_box, bg=INNER)
         card.pack(fill="x", padx=S(2), pady=S(1))
         top = tk.Frame(card, bg=INNER)
@@ -2386,11 +2912,12 @@ class Pet:
         x.bind("<Button-1>", lambda ev: self.close_detail())
         self.pill_label(top, e).pack(side="right", padx=(0, S(8)))
         title = tk.Label(card, text=" " + (e.get("title") or e.get("prompt") or "?"),
-                         image=self.icon(e.get("src")), compound="left", bg=INNER, fg=FG,
+                         image=self.icon(e.get("src")), compound="left", bg=INNER,
+                         fg=DONE_FG if status == "done" else FG,
                          font=(FONT, 10, "bold"), wraplength=S(300), justify="left", anchor="w",
                          cursor="hand2")
         title.pack(fill="x", pady=(S(6), 0))
-        title.bind("<Double-Button-1>", lambda ev: open_task(key, e))
+        title.bind("<Double-Button-1>", lambda ev: self.title_open(key, e))
         info = tk.Label(card, text=self.info_text(e, now), bg=INNER, fg=self.info_color(e),
                         font=(FONT, 8), anchor="w")
         info.short = False
@@ -2416,95 +2943,303 @@ class Pet:
             self.reply_entry(card, key,
                              allow_img=not e.get("card") and e.get("entry") != "claude-vscode")
 
-    # ---- 대화 기록창: 최근 대화를 위아래로, 맨 아래(최신)부터. 맨 위까지 올리면 이전 대화를 더 불러옴 ----
+    # ---- 대화 기록창 (채팅): 내 메시지는 오른쪽 주황 말풍선, Claude 글은 왼쪽 흰 칸 ----
+    # 맨 아래(최신)부터 보이고, 맨 위에서 휠을 더 올리면 이전 대화를 6개씩 더 불러온다.
+    # 새 글이 오면 이 칸 안에서 달라진 곳만 고쳐 그린다 → 카드 전체(입력칸)는 그대로라
+    # 로봇에서 글을 쓰는 중에 Claude가 일해도 쓰던 글·한글 조합·커서가 끊기지 않는다.
+    CHAT_STEP = 6            # 한 번에 더 보여 줄 대화 수
+    CHAT_TEXT_MAX = 4000     # Claude 글 한 칸은 끝에서 이만큼만 (아주 긴 글도 가볍게)
+    CHAT_PARTS = 14          # 한 대화에서 보여 줄 글·도구 줄 수 (넘으면 앞을 생략)
+
     def chat_area(self, parent, key, e):
         h = self._hist
-        if h.get("key") != key:
+        if h.get("key") != key:                  # 다른 세션을 펼치면 처음부터 (최근 6개, 맨 아래)
             h.clear()
-            h.update(key=key, bytes=1_500_000, show=6, at_bottom=True)
+            h.update(key=key, bytes=1_500_000, show=self.CHAT_STEP, at_bottom=True)
+        cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0, yscrollincrement=S(14))
+        inner = tk.Frame(cv, bg=INNER)
+        cv.create_window(0, 0, window=inner, anchor="nw", tags="inner")
+        cv.pack(fill="x", pady=(S(4), 0))
+        self._chat = {"cv": cv, "inner": inner, "rows": [], "H": 0, "working": None}
+        self.read_chat(e)
+        self.fill_chat(e)
+
+    def read_chat(self, e, force=False):
+        """기록 파일이 바뀌었으면 다시 읽는다 (바뀌었으면 True)."""
+        h = self._hist
         try:
             mtime = os.path.getmtime(e["transcript"])
         except OSError:
             mtime = 0
-        if h.get("mtime") != mtime or h.get("dirty"):
-            h["turns"], h["more"] = claude_turns(e["transcript"], h["bytes"])
-            h["mtime"], h["dirty"] = mtime, False
-        turns = h["turns"]
-        shown = turns[-h["show"]:]
-        working = e.get("status") == "working"
-        cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0, yscrollincrement=S(14))
-        inner = tk.Frame(cv, bg=INNER)
-        cv.create_window(0, 0, window=inner, anchor="nw")
-        if len(turns) > len(shown) or h.get("more"):
-            tk.Label(inner, text=t("older_hint"), bg=INNER, fg=SUB, font=(FONT, 8)).pack(pady=(S(2), 0))
-        for i, turn in enumerate(shown):
-            if turn["me"]:
-                self.my_message(inner, turn["me"])
-            if i == len(shown) - 1 and working:  # 일하는 중이면 마지막 칸에 지금 쓰고 있는 글
-                tk.Label(inner, text=t("thinking"), bg=INNER, fg=WORKING, font=(FONT, 8, "bold"),
-                         anchor="w").pack(fill="x", pady=(S(8), 0))
-            text = "\n\n".join(turn["ai"])
-            if text and self.settings.get("answer_preview", True):
-                self.answer_box(inner, text, max_lines=80)
-        inner.update_idletasks()
-        W, H = max(inner.winfo_reqwidth(), S(330)), inner.winfo_reqheight()
-        view = min(H, S(360))
-        cv.configure(width=W, height=view, scrollregion=(0, 0, W, H))
-        cv.pack(fill="x", pady=(S(4), 0))
-        self._chat, self._chat_h = cv, H
+        if not force and "turns" in h and mtime == h.get("mtime"):
+            return False
+        h["turns"], h["more"] = claude_turns(e["transcript"], h["bytes"])
+        h["plan"], h["plan_at"] = claude_plan(e["transcript"])
+        h["mtime"] = mtime
+        return True
 
-        def wheel_to_me(w):                      # 안쪽 칸들이 휠을 먹지 않고 이 기록창이 받게
-            w.bind("<MouseWheel>", self.chat_wheel)
-            for c in w.winfo_children():
-                wheel_to_me(c)
-        wheel_to_me(cv)
-        # 읽던 자리: 맨 아래였으면 계속 최신으로, 이전 대화를 불러왔으면 보던 글이 그 자리에,
+    def chat_blocks(self, e):
+        """기록창에 위에서부터 그릴 것: 이전 대화 안내 · (내 메시지 · Claude 글 · 도구 줄 · 계획)… ·
+        일하는 중이면 맨 아래 '읽는 중 taskpet.py' 같은 지금 하는 일 (없으면 '생각 중…')."""
+        h = self._hist
+        turns = h.get("turns") or []
+        shown = turns[-h["show"]:]
+        out = []
+        if len(turns) > len(shown) or h.get("more"):
+            out.append(("older", ""))
+        show_ai = self.settings.get("answer_preview", True)
+        self._img_data = {}
+
+        def img(kind, b64):                      # 그림은 칸 비교용 짧은 이름으로, 내용은 따로 둔다
+            sig = f"{len(b64)}:{b64[:24]}{b64[-24:]}"
+            self._img_data[sig] = b64
+            return kind, sig
+        for turn in shown:
+            me, imgs = turn["me"], turn.get("imgs") or []
+            if imgs:                             # 그림은 아래에 작게 보이므로 '(이미지)' 글자는 뺀다
+                me = "\n".join(x for x in me.split("\n") if x != "(이미지)")
+            if me:
+                out.append(("me", me))
+            out += [img("myimg", b) for b in imgs[:4]]
+            parts = turn.get("parts") or []
+            if not show_ai:
+                parts = [p for p in parts if p[0] != "text"]
+            if len(parts) > self.CHAT_PARTS:     # 아주 긴 턴은 끝부분만 (7개 단위로 잘라 자주 다시 그리지 않게)
+                cut = (len(parts) - self.CHAT_PARTS + 6) // 7 * 7
+                out.append(("omit", t("omitted", n=cut)))
+                parts = parts[cut:]
+            for kind, val in parts:
+                if kind == "text":
+                    if len(val) > self.CHAT_TEXT_MAX:
+                        val = "…" + val[-self.CHAT_TEXT_MAX:]
+                    out.append(("ai", val))
+                elif kind == "image":
+                    out.append(img("image", val))
+                else:
+                    out.append(("tools", tools_summary(val)))
+        # 계획은 Claude 앱처럼 최근 메시지 아래에 하나: 아직 남은 단계가 있거나, 이번 대화에서 고친 것
+        plan, plan_at = h.get("plan"), h.get("plan_at", 0)
+        last = turns[-1] if turns else {}
+        if plan and (any(x["status"] != "completed" for x in plan) or plan_at >= last.get("t0", 0)):
+            out.append(("plan", tuple((x["status"], x["content"]) for x in plan)))
+        if e.get("status") == "working":
+            now_doing = tool_doing(last["open"]) if last.get("open") else t("thinking")
+            out.append(("status", now_doing))
+        return out
+
+    def chat_view_max(self):
+        """기록창 높이 한도: 화면이 낮으면 줄여서 입력칸·선택지가 화면 밖으로 밀리지 않게."""
+        l, t_, r, b = work_area()
+        # 입력칸이 여러 줄로 늘어난 만큼(_input_extra) 줄여서 말풍선 전체 크기는 그대로
+        return max(S(120), min(S(380), (b - t_) - S(340)) - getattr(self, "_input_extra", 0))
+
+    def relayout_chat(self):
+        """기록창 높이만 다시 맞춘다 (입력칸이 늘거나 줄었을 때). 맨 아래를 보던 중이면 계속 맨 아래."""
+        ch = self._chat
+        if not ch or not ch["H"]:
+            return
+        cv = ch["cv"]
+        try:
+            at_bottom = cv.yview()[1] >= 0.999
+            cv.configure(height=min(ch["H"], self.chat_view_max()))
+            if at_bottom:
+                cv.yview_moveto(1.0)
+        except tk.TclError:
+            pass
+
+    def fill_chat(self, e, older=False):
+        """기록창을 채운다. 이미 그려 둔 칸은 그대로 두고, 달라진 곳부터 아래만 새로 그린다."""
+        ch = self._chat
+        cv, inner, rows = ch["cv"], ch["inner"], ch["rows"]
+        if ch["H"]:                              # 지금 보던 자리
+            a, b = cv.yview()
+            pos = {"at_bottom": b >= 0.999, "top_px": a * ch["H"], "from_bottom": ch["H"] * (1 - a)}
+        else:                                    # 카드를 다시 만들기 전에 저장해 둔 자리
+            pos = self._hist
+        blocks = self.chat_blocks(e)
+        same = 0
+        while same < min(len(rows), len(blocks)) and rows[same][0] == blocks[same]:
+            same += 1
+        for _, w in rows[same:]:
+            w.destroy()
+        del rows[same:]
+        for kind, text in blocks[same:]:
+            if kind in ("older", "omit"):
+                w = tk.Label(inner, text=t("older_hint") if kind == "older" else text,
+                             bg=INNER, fg=SUB, font=(FONT, 8))
+                w.pack(pady=(S(2), 0))
+            elif kind == "me":
+                w = self.my_message(inner, text)
+            elif kind == "ai":
+                w = self.answer_box(inner, text)
+            elif kind == "tools":                # 도구를 쓴 묶음: 작은 회색 한 줄
+                w = tk.Label(inner, text="· " + text, bg=INNER, fg=SUB, font=(FONT, 8), anchor="w",
+                             justify="left", wraplength=S(320))
+                w.pack(fill="x", padx=(S(6), 0), pady=(S(5), 0))
+            elif kind == "plan":
+                w = self.plan_box(inner, text)
+            elif kind in ("image", "myimg"):
+                w = self.image_block(inner, text, right=kind == "myimg")
+            else:                                # 지금 하는 일 + 걸린 시간 (시간은 follow_progress 가 1초마다)
+                w = tk.Frame(inner, bg=INNER)
+                w.pack(fill="x", padx=(S(6), 0), pady=(S(6), 0))
+                # 길면 말풍선이 넓어지므로 짧게 자른다 (시간 글자까지 기록창 폭 안에)
+                tk.Label(w, text="● " + (text if len(text) <= 24 else text[:23] + "…"), bg=INNER,
+                         fg=WORKING, font=(FONT, 8, "bold"), anchor="w").pack(side="left")
+                w.clock = tk.Label(w, text="", bg=INNER, fg=SUB, font=(FONT, 8))
+                w.clock.pack(side="left", padx=(S(6), 0))
+            rows.append(((kind, text), w))
+        ch["working"] = e.get("status") == "working"
+        turns = self._hist.get("turns") or []
+        ch["t0"] = turns[-1].get("t0", 0) if turns else 0
+        self.tick_status()
+        inner.update_idletasks()
+        W = max(inner.winfo_reqwidth(), S(330))
+        H = max(inner.winfo_reqheight(), 1)
+        view = min(H, self.chat_view_max())
+        cv.itemconfigure("inner", width=W)        # 폭을 채워야 내 메시지가 오른쪽 끝에 붙음
+        cv.configure(width=W, height=view, scrollregion=(0, 0, W, H))
+        ch["H"] = H
+        # 읽던 자리: 이전 대화를 불러왔으면 보던 글이 그 자리에, 맨 아래였으면 계속 최신으로,
         # 위로 올려 읽던 중이면 새 글이 와도 그 위치 그대로
-        if h.get("at_bottom", True) or H <= view:
+        if older:
+            cv.yview_moveto(max(0.0, H - pos.get("from_bottom", H)) / H)
+        elif pos.get("at_bottom", True) or H <= view:
             cv.yview_moveto(1.0)
-        elif h.pop("keep_bottom", False):
-            cv.yview_moveto(max(0.0, (H - h.get("from_bottom", H)) / H))
         else:
-            cv.yview_moveto(h.get("top_px", 0) / H)
+            cv.yview_moveto(pos.get("top_px", 0) / H)
+
+    def tick_status(self):
+        """맨 아래 '지금 하는 일' 줄 옆에 이번 대화가 걸린 시간 (Claude 앱처럼 '읽는 중 a.py  3분 12초')."""
+        ch = self._chat
+        if not ch or not ch["rows"] or ch["rows"][-1][0][0] != "status":
+            return
+        w = ch["rows"][-1][1]
+        try:
+            w.clock.configure(text=fmt_dur(time.time() - ch["t0"]) if ch.get("t0") else "")
+        except tk.TclError:
+            pass
+
+    def image_block(self, parent, sig, right=False):
+        """대화 속 그림을 작게 (둥근 모서리, 내가 붙인 것은 오른쪽). 누르면 크게 열기."""
+        cache = self._thumb_cache
+        ph = cache.get(sig)
+        if ph is None:
+            try:
+                im = Image.open(io.BytesIO(base64.b64decode(self._img_data[sig])))
+                im = im.convert("RGB")
+            except Exception:
+                w = tk.Label(parent, text=t("img_broken"), bg=INNER, fg=SUB, font=(FONT, 8))
+                w.pack(anchor="e" if right else "w")
+                return w
+            im.thumbnail((S(220), S(150)), Image.LANCZOS)
+            w, h = im.size
+            k, r = 4, S(10)
+            mask = Image.new("L", (w * k, h * k), 0)
+            ImageDraw.Draw(mask).rounded_rectangle([0, 0, w * k - 1, h * k - 1], radius=r * k, fill=255)
+            out = Image.new("RGB", (w, h), INNER)
+            out.paste(im, mask=mask.resize((w, h), Image.LANCZOS))
+            ph = ImageTk.PhotoImage(out)
+            if len(cache) > 60:                  # 오래된 것부터 버림
+                cache.pop(next(iter(cache)))
+            cache[sig] = ph
+        lb = tk.Label(parent, image=ph, bg=INNER, bd=0, cursor="hand2")
+        lb.img = ph
+        lb.pack(anchor="e" if right else "w", padx=(0, 0) if right else (S(6), 0), pady=(S(6), 0))
+        lb.bind("<Button-1>", lambda ev: self.open_image(sig))
+        return lb
+
+    def open_image(self, sig):
+        """그림을 임시 파일로 저장해 사진 앱으로 크게 연다."""
+        try:
+            raw = base64.b64decode(self._img_data[sig])
+            ext = (".png" if raw[:4] == b"\x89PNG" else ".jpg" if raw[:2] == b"\xff\xd8" else
+                   ".webp" if raw[8:12] == b"WEBP" else ".gif" if raw[:4] == b"GIF8" else ".png")
+            folder = os.path.join(tempfile.gettempdir(), "TaskPet-images")
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, "img-" + hashlib.sha1(raw).hexdigest()[:12] + ext)
+            if not os.path.exists(path):
+                with open(path, "wb") as f:
+                    f.write(raw)
+            os.startfile(path)
+        except Exception:
+            pass
+
+    def plan_box(self, parent, items):
+        """계획(할 일 목록): 둥근 칸 안에 ✓ 끝남 · ● 하는 중 · ○ 남음."""
+        cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0)
+        box = tk.Frame(cv, bg=ANS_BG)
+        tk.Label(box, text=t("plan"), bg=ANS_BG, fg=SUB, font=(FONT, 8, "bold"), anchor="w").pack(fill="x")
+        for status, content in items:
+            mark, mark_fg = {"completed": ("✓", DONE_FG), "in_progress": ("●", WORKING)}.get(status, ("○", SUB))
+            row = tk.Frame(box, bg=ANS_BG)
+            row.pack(fill="x", pady=(S(2), 0))
+            tk.Label(row, text=mark, bg=ANS_BG, fg=mark_fg, font=(FONT, 9, "bold"), width=2,
+                     anchor="n").pack(side="left", anchor="n")
+            tk.Label(row, text=content, bg=ANS_BG, fg=SUB if status == "completed" else ANS_FG,
+                     font=(FONT, 9, "bold" if status == "in_progress" else "normal"),
+                     justify="left", anchor="w", wraplength=S(270)).pack(side="left", fill="x")
+        box.update_idletasks()
+        pad = S(10)
+        w, h = max(box.winfo_reqwidth() + pad * 2, S(300)), box.winfo_reqheight() + pad * 2
+        cv.configure(width=w, height=h)
+        cv.img = self.round_photo(w, h, ANS_BG, outline=ENTRY_LINE, ow=S(1), r=S(14), keep=False)
+        cv.create_image(0, 0, image=cv.img, anchor="nw")
+        cv.create_window(pad, pad, window=box, anchor="nw")
+        cv.pack(anchor="w", pady=(S(8), 0))
+        return cv
 
     def save_chat_state(self):
-        cv = getattr(self, "_chat", None)
-        self._chat = None
-        if not cv:
+        """카드를 통째로 다시 만들기 전에 기록창에서 보던 자리를 기억해 둔다."""
+        ch, self._chat = self._chat, None
+        if not ch or not ch["H"]:
             return
         try:
-            a, b = cv.yview()
+            a, b = ch["cv"].yview()
         except tk.TclError:
             return
-        H = self._chat_h
-        self._hist.update(at_bottom=b >= 0.999, top_px=a * H, from_bottom=H - a * H)
+        H = ch["H"]
+        self._hist.update(at_bottom=b >= 0.999, top_px=a * H, from_bottom=H * (1 - a))
 
     def chat_wheel(self, ev):
-        cv = getattr(self, "_chat", None)
-        if not cv:
-            return "break"
-        cv.yview_scroll(-3 if ev.delta > 0 else 3, "units")
-        if ev.delta > 0 and cv.yview()[0] <= 0.0:
+        """기록창 위에서 휠: 위아래로 굴리고, 맨 위에서 더 올리면 이전 대화를 불러온다.
+        (말풍선 창 전체에 걸어 둠 — 입력칸에 커서가 있어도 휠은 기록창이 받게)"""
+        ch = self._chat
+        if not ch:
+            return None
+        cv = ch["cv"]
+        try:
+            w = cv.winfo_containing(ev.x_root, ev.y_root)
+        except (tk.TclError, KeyError):
+            w = None
+        if w is None or not (w == cv or str(w).startswith(str(cv) + ".")):
+            return None
+        up = ev.delta > 0
+        if up and cv.yview()[0] <= 0.0:
             self.load_older()
+        else:
+            cv.yview_scroll(-3 if up else 3, "units")
         return "break"
 
     def load_older(self):
-        """맨 위까지 올리면 이전 대화 6개를 더 (보여 줄 게 모자라면 기록 파일을 더 앞에서부터 읽음)."""
-        if time.time() - getattr(self, "_older_at", 0) < 0.5:
+        """이전 대화 6개를 더 (보여 줄 게 모자라면 기록 파일을 더 앞에서부터 읽음)."""
+        if time.time() - getattr(self, "_older_at", 0) < 0.6:
             return
         h = self._hist
-        if h.get("show", 0) < len(h.get("turns", [])):
-            h["show"] += 6
+        e = self.tracker.tasks.get(self.detail) if self.detail else None
+        if not e or not self._chat:
+            return
+        if h.get("show", 0) < len(h.get("turns") or []):
+            h["show"] += self.CHAT_STEP
         elif h.get("more"):
             h["bytes"] *= 3
-            h["show"] += 6
-            h["dirty"] = True
+            h["show"] += self.CHAT_STEP
+            self.read_chat(e, force=True)
         else:
             return
         self._older_at = time.time()
-        self.save_chat_state()
-        h["keep_bottom"], h["at_bottom"] = True, False
-        self.update_bubble(force=True)
+        self.fill_chat(e, older=True)
+        self.position_bubble()
 
     def my_message(self, parent, text):
         """내가 보낸 메시지: 오른쪽에 붙인 주황 말풍선 (길면 앞부분만)."""
@@ -2513,66 +3248,78 @@ class Pet:
         cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0)
         lb = tk.Label(cv, text=text, bg=MY_BG, fg=MY_FG, font=(FONT, 10), justify="left",
                       wraplength=S(250), padx=0, pady=0)
-        lb.update_idletasks()
-        padx, pady = S(12), S(7)
+        padx, pady = S(12), S(7)                 # (글자 칸 크기는 만들 때 바로 정해져서 따로 기다리지 않음)
         w, h = lb.winfo_reqwidth() + padx * 2, lb.winfo_reqheight() + pady * 2
         cv.configure(width=w, height=h)
-        cv.create_image(0, 0, image=self.round_photo(w, h, MY_BG, r=min(S(16), h // 2)), anchor="nw")
+        # 크기가 제각각이라 그림을 모아 두지 않고 이 칸이 들고 있다 (칸이 지워지면 같이 사라짐)
+        cv.img = self.round_photo(w, h, MY_BG, r=min(S(16), h // 2), keep=False)
+        cv.create_image(0, 0, image=cv.img, anchor="nw")
         cv.create_window(padx, pady, window=lb, anchor="nw")
         cv.pack(anchor="e", pady=(S(8), 0))
+        return cv
 
-    def answer_box(self, parent, text, tail=False, max_lines=12):
-        """마지막 답변을 읽기 좋게: 소제목은 굵게, 목록은 •, 문단 사이는 띄우고, 길면 칸 안에서 스크롤."""
+    def answer_box(self, parent, text):
+        """Claude 글을 읽기 좋게: 소제목은 굵게, 목록은 •, 문단 사이는 띄운 둥근 흰 칸 (높이는 글에 딱 맞게)."""
         lines = answer_lines(text)
         cv = tk.Canvas(parent, bg=INNER, highlightthickness=0, bd=0)   # 둥근 바탕을 깔 자리
-        tw = tk.Text(cv, bg=ANS_BG, fg=ANS_FG, font=(FONT, 10), wrap="word", relief="flat",
+        tw = self.answer_text(cv)
+        self.fill_answer(tw, lines)
+        tw.configure(state="disabled")           # 읽기만 (끌어서 복사는 됨)
+        th = self.text_px(lines) + S(2) * 2      # 글 높이 + 위아래 pady
+        pad = S(9)
+        w, h = tw.winfo_reqwidth() + pad * 2, th + pad * 2
+        cv.configure(width=w, height=h)
+        cv.img = self.round_photo(w, h, ANS_BG, r=S(16), keep=False)
+        cv.create_image(0, 0, image=cv.img, anchor="nw")
+        cv.create_window(pad, pad, window=tw, anchor="nw", height=th)
+        cv.pack(anchor="w", pady=(S(8), 0))
+        # 글 칸이 휠을 먹으면 기록창이 안 굴러가므로 기록창으로 넘긴다
+        tw.bind("<MouseWheel>", lambda ev: self.chat_wheel(ev) or "break")
+        return cv
+
+    def answer_text(self, parent):
+        """Claude 글 칸. 보이는 칸과 높이를 재는 칸이 똑같아야 해서 한곳에서 만든다."""
+        # 실수로 끌어도 파랗게 선택되지 않게 (줄 끝 빈 곳까지 파랗게 칠해져 보기 싫었음): 선택 색을 바탕과 같게,
+        # 끌기·두세 번 클릭 선택은 막음
+        tw = tk.Text(parent, bg=ANS_BG, fg=ANS_FG, font=(FONT, 10), wrap="word", relief="flat",
                      width=40, padx=S(4), pady=S(2), highlightthickness=0, bd=0, cursor="arrow",
-                     spacing1=S(3), spacing2=S(3), spacing3=S(4))
+                     spacing1=S(3), spacing2=S(3), spacing3=S(4), exportselection=False,
+                     selectbackground=ANS_BG, selectforeground=ANS_FG, inactiveselectbackground=ANS_BG)
+        for seq in ("<B1-Motion>", "<Double-Button-1>", "<Triple-Button-1>", "<Shift-Button-1>"):
+            tw.bind(seq, lambda ev: "break")
         tw.tag_configure("h", font=(FONT, 10, "bold"), foreground=ANS_HEAD, spacing1=S(7))
         tw.tag_configure("li", lmargin1=S(4), lmargin2=S(16))
         tw.tag_configure("gap", spacing1=S(3))
-        # 높이 = 실제로 접혀 보일 줄 수 (낱말 단위로 접는 것을 글자 폭으로 따라 해 본다) + 줄 간격 몫
-        f = tkfont.Font(root=self.root, font=(FONT, 10))
-        fb = tkfont.Font(root=self.root, font=(FONT, 10, "bold"))
-        room = f.measure("0") * 40
+        return tw
 
-        def wrapped(s, font, width):
-            rows, cur, sp = 1, 0, font.measure(" ")
-            for word in s.split(" "):
-                w = font.measure(word)
-                if cur and cur + sp + w > width:
-                    rows, cur = rows + 1, w
-                else:
-                    cur += (sp if cur else 0) + w
-                while cur > width:              # 아주 긴 낱말은 글자 단위로 접힘
-                    rows, cur = rows + 1, cur - width
-            return rows
-        n, extra = 0, 0
+    @staticmethod
+    def fill_answer(tw, lines):
         for kind, s in lines:
             tw.insert("end", s + "\n", kind)
-            rows = wrapped(s, fb if kind == "h" else f, room - (S(16) if kind == "li" else 0))
-            n += rows
-            # spacing1·3 은 문단(원래 한 줄)마다, spacing2 는 접힌 줄 사이마다 붙는다
-            extra += S(7) + S(3) * (rows - 1) + (S(7) if kind == "h" else S(3) if kind == "gap" else 0)
         tw.delete("end-2c", "end-1c")            # 마지막 빈 줄
-        n += -(-extra // (f.metrics("linespace") * 3))   # 줄 간격 몫은 Tk가 대부분 높이에 넣어 줌
-        tw.configure(height=max(2, min(n, max_lines)), state="disabled")   # 읽기만 (끌어서 복사는 됨)
-        tw.update_idletasks()
-        pad = S(9)
-        w, h = tw.winfo_reqwidth() + pad * 2, tw.winfo_reqheight() + pad * 2
-        cv.configure(width=w, height=h)
-        cv.create_image(0, 0, image=self.round_photo(w, h, ANS_BG, r=S(16)), anchor="nw")
-        cv.create_window(pad, pad, window=tw, anchor="nw")
-        cv.pack(anchor="w", pady=(S(8), 0))
-        if tail:                                 # 일하는 중이면 가장 최근 글이 보이게 끝으로
-            tw.see("end")
 
-    def chip(self, parent, text, command, sub=False):
-        """작은 버튼 (말풍선이 투명 창이라 Label로 만들고 누르면 command)."""
+    def text_px(self, lines):
+        """글이 실제로 차지할 높이(px). 화면 밖에 둔 같은 모양의 칸에 넣어 Tk가 접은 그대로 잰다
+        (글자 폭으로 어림하면 아래가 비거나 잘려서)."""
+        m = getattr(self, "_measure", None)
+        if m is None:
+            # 이미 떠 있는 로봇 창 안, 보이는 곳 바깥(왼쪽 멀리)에 둔다 — 화면에 붙어 있어야 폭이 정해져서 잴 수 있음
+            m = self._measure = self.answer_text(self.root)
+            m.place(x=-S(3000), y=0)
+        if m.winfo_width() <= 1:
+            self.root.update_idletasks()
+        m.delete("1.0", "end")
+        self.fill_answer(m, lines)
+        r = m.count("1.0", "end", "update", "ypixels")
+        return int((r[0] if isinstance(r, tuple) else r) or 0)
+
+    def chip(self, parent, text, command, sub=False, under=INNER, pack=True):
+        """작은 버튼 (말풍선이 투명 창이라 Label로 만들고 누르면 command). under = 버튼 둘레 바탕색."""
         base, fg = (CHIP_SUB_BG, CHIP_SUB_FG) if sub else (CHIP_BG, CHIP_FG)
         b = self.round_label(parent, text, base, fg, size=8, padx=10, pady=4,
-                             hover=(CHIP_HOVER, CHIP_FG))
-        b.pack(side="left", padx=(0, S(4)))
+                             hover=(CHIP_HOVER, CHIP_FG), under=under)
+        if pack:
+            b.pack(side="left", padx=(0, S(4)))
         b.bind("<Button-1>", lambda ev: command())
         return b
 
@@ -2585,29 +3332,116 @@ class Pet:
         return b
 
     def reply_entry(self, box, key, allow_img=True):
-        f = tk.Frame(box, bg=INNER)
-        f.pack(fill="x", pady=(S(8), 0))
-        # 입력칸도 알약 모양: 둥근 바탕(테두리 파랑)을 깔고 그 안에 테두리 없는 입력칸
-        lh = tkfont.Font(root=self.root, font=(FONT, 9)).metrics("linespace")
-        eh = lh + S(14)
-        ew = S(330) - (S(130) if allow_img else S(56))
-        cv = tk.Canvas(f, width=ew, height=eh, bg=INNER, highlightthickness=0, bd=0)
-        cv.create_image(0, 0, image=self.round_photo(ew, eh, ENTRY_BG, outline=ENTRY_LINE, ow=S(1)),
-                        anchor="nw")
-        ent = tk.Entry(cv, textvariable=self.reply_var, bg=ENTRY_BG, fg=ENTRY_FG,
-                       insertbackground=ENTRY_FG, relief="flat", bd=0, font=(FONT, 9),
-                       highlightthickness=0)
-        cv.create_window(eh // 2, eh // 2, window=ent, anchor="w", width=ew - eh)
-        cv.pack(side="left", padx=(0, S(4)))
-        ent.bind("<Return>", lambda ev: self.send_reply(key, self.reply_var.get(), other=True))
-        ent.bind("<Escape>", lambda ev: self.close_detail())
-        # 다른 곳(다른 창)을 누르면 카드를 닫는다 (쓰던 글·붙인 이미지는 기억해 둠)
-        ent.bind("<FocusOut>", lambda ev: self.root.after(250, self.close_if_unfocused))
+        # Claude·ChatGPT 앱의 입력창처럼: 폭 가득한 둥근 상자 안에 여러 줄 글 칸(길어지면 6줄까지 늘어나고
+        # 그 뒤로는 칸 안에서 스크롤), 상자 아래쪽 안에 '이미지'(왼쪽)·'➤'(오른쪽) 버튼.
+        # Enter = 보내기, Shift+Enter = 줄바꿈, 글씨는 Claude 글과 같은 글씨체·크기, 비어 있으면 흐린 안내 글.
+        ew = S(330)
+        padx, pady, gap, bot = S(12), S(9), S(4), S(6)
+        tw_px = ew - padx * 2
+        cv = tk.Canvas(box, width=ew, bg=INNER, highlightthickness=0, bd=0)
+        cv.pack(anchor="w", pady=(S(8), 0))
+        ent = tk.Text(cv, bg=ENTRY_BG, fg=ENTRY_FG, insertbackground=ENTRY_FG, relief="flat", bd=0,
+                      font=REPLY_FONT, wrap="word", width=1, height=1, padx=0, pady=0,
+                      spacing2=S(2), highlightthickness=0,
+                      # 고칠 글을 고를 때는 파랑 대신 옅은 주황, 다른 데를 누르면 선택 표시는 안 보이게
+                      selectbackground=SELECT_BG, selectforeground=ENTRY_FG, inactiveselectbackground=ENTRY_BG)
+        ent.tag_configure("ime", underline=True)   # 조합 중인 한글 (InlineIME)
+        ent.is_reply = True                      # entry_focused()·InlineIME 가 알아보게
+        ent.insert("1.0", self.reply_var.get())
+        ent.edit_modified(False)
+        ent.edit_reset()
+        hint = tk.Label(ent, text=t("reply_hint"), bg=ENTRY_BG, fg=HINT_FG, font=REPLY_FONT,
+                        padx=0, pady=0, bd=0, cursor="xterm")
+        hint.bind("<Button-1>", lambda ev: self.focus_entry(ent, "end"))
+        bg = cv.create_image(0, 0, anchor="nw")
+        win = cv.create_window(padx, pady, window=ent, anchor="nw", width=tw_px)
+        send = self.chip(cv, t("reply_send"), lambda: self.send_reply(key, ent.get("1.0", "end-1c"), other=True),
+                         under=ENTRY_BG, pack=False)
+        send_id = cv.create_window(0, 0, window=send, anchor="se")
+        pick_id = None
         if allow_img:
             ent.bind("<Control-v>", lambda ev: self.paste_image())
             ent.bind("<Control-V>", lambda ev: self.paste_image())
-            self.chip(f, t("img_pick"), self.pick_image, sub=True)   # 그림 글자(📎)는 작게 깨져서 글자로
-        self.chip(f, t("reply_send"), lambda: self.send_reply(key, self.reply_var.get(), other=True))
+            pick = self.chip(cv, t("img_pick"), self.pick_image, sub=True, under=ENTRY_BG, pack=False)
+            pick_id = cv.create_window(0, 0, window=pick, anchor="sw")
+        bar_h = send.winfo_reqheight()
+
+        def fit(th):
+            """글 칸 높이 th(px)에 맞춰 둥근 상자·버튼 자리를 바꾼다."""
+            eh = pady + th + gap + bar_h + bot
+            cv.configure(height=eh)
+            cv.img = self.round_photo(ew, eh, ENTRY_BG, outline=ENTRY_LINE, ow=S(1), r=S(16))
+            cv.itemconfigure(bg, image=cv.img)
+            cv.itemconfigure(win, height=th)
+            cv.coords(send_id, ew - padx + S(4), eh - bot)
+            if pick_id:
+                cv.coords(pick_id, padx - S(4), eh - bot)
+            cv.th = th
+            # 늘어난 만큼 위의 대화 기록창을 줄여 말풍선 크기는 그대로
+            self._input_extra = th - self.reply_lh()
+            self.relayout_chat()
+
+        def show_hint():
+            if ent.get("1.0", "end-1c"):
+                hint.place_forget()
+            else:                                # 커서(맨 왼쪽)를 덮지 않게 조금 오른쪽에
+                hint.place(x=S(8), y=0)
+
+        def trim_sel(ev=None):
+            # 글 끝을 넘어 끌면 마지막 줄바꿈까지 골라져 줄 오른쪽 끝까지 색이 칠해지므로 그 부분은 뺀다
+            try:
+                if ent.tag_ranges("sel") and ent.compare("sel.last", ">", "end-1c"):
+                    ent.tag_remove("sel", "end-1c", "end")
+            except tk.TclError:
+                pass
+        ent.bind("<<Selection>>", trim_sel, add="+")
+        fit(self.input_px(self.reply_var.get(), tw_px))
+        show_hint()
+
+        def changed(ev=None):
+            if not ent.edit_modified():
+                return
+            ent.edit_modified(False)
+            text = ent.get("1.0", "end-1c")
+            if text != self.reply_var.get():
+                self.reply_var.set(text)         # → 세션마다 저장
+            show_hint()
+            th = self.input_px(text, tw_px)
+            if th != cv.th:                      # 줄 수가 바뀌면 칸을 늘이거나 줄인다
+                fit(th)
+                ent.see("insert")
+                self.position_bubble()
+
+        ime = self.ime
+
+        def on_return(ev):
+            if ime:
+                ime.flush()                      # 막 완성된 한글이 먼저 칸에 들어가게
+            if ev.state & 0x0001:                # Shift+Enter → 줄바꿈 (기본 동작)
+                return None
+            self.send_reply(key, ent.get("1.0", "end-1c"), other=True)
+            return "break"
+
+        def on_key(ev):
+            if ime:
+                ime.flush()                      # (스페이스 등은 완성된 한글 뒤에 들어가야 함)
+            self._typed_at = time.time()
+
+        def on_focus(ev):
+            ime_font(ent)
+            if ime:
+                ime.attach(ent)
+        ent.bind("<<Modified>>", changed)
+        ent.bind("<Return>", on_return)
+        ent.bind("<KP_Enter>", on_return)
+        ent.bind("<FocusIn>", on_focus, add="+")
+        ent.bind("<FocusOut>", lambda ev: ime and ime.detach(ent), add="+")
+        ent.bind("<Escape>", lambda ev: self.close_detail())
+        ent.bind("<Key>", on_key, add="+")
+        # 다른 곳을 눌렀다가 다시 입력칸을 누르면 키보드를 받게 (커서는 누른 자리에)
+        # (다른 프로그램을 눌러도 카드는 닫지 않는다 — 보통 프로그램처럼. 닫기는 ‹ 목록·✕·Esc)
+        ent.bind("<Button-1>", lambda ev: self.focus_entry(ent, None), add="+")
+        self._draft_key = key
         if allow_img and self.reply_imgs:   # 붙인 이미지 미리보기 (누르면 그 이미지 빼기)
             row = tk.Frame(box, bg=INNER)
             row.pack(anchor="w", pady=(S(3), 0))
@@ -2624,7 +3458,34 @@ class Pet:
                 lb.pack(side="left", padx=(0, S(4)))
                 lb.bind("<Button-1>", lambda ev, p=path: self.drop_image(p))
             tk.Label(row, text=t("img_hint"), bg=INNER, fg=SUB, font=(FONT, 7)).pack(side="left")
-        self.root.after(60, lambda: self.focus_entry(ent))
+        # 커서는 사용자가 카드를 열었을 때나, 다시 만들기 전에 입력칸에 있었을 때만 준다
+        # (Claude가 일하는 동안 카드가 바뀌어도 다른 창에서 쓰던 키보드를 뺏지 않게)
+        if self._want_focus or self._refocus is not None:
+            pos = "end" if self._refocus is None else self._refocus
+            self.root.after(60, lambda: self.focus_entry(ent, pos))
+        self._want_focus, self._refocus = False, None
+
+    def reply_lh(self):
+        if not getattr(self, "_reply_lh", 0):
+            self._reply_lh = tkfont.Font(root=self.root, font=REPLY_FONT).metrics("linespace")
+        return self._reply_lh
+
+    def input_px(self, text, px):
+        """입력칸 글 높이(px): 1줄 ~ 6줄 (넘으면 칸 안에서 스크롤). 화면 밖 같은 모양 칸에 넣어 잰다."""
+        m = getattr(self, "_measure_in", None)
+        if m is None:
+            m = self._measure_in = tk.Text(self.root, font=REPLY_FONT, wrap="word", width=1, height=1,
+                                           padx=0, pady=0, bd=0, spacing2=S(2), highlightthickness=0)
+        if getattr(m, "px", None) != px:
+            m.place(x=-S(3000), y=0, width=px)
+            m.px = px
+            self.root.update_idletasks()
+        m.delete("1.0", "end")
+        m.insert("1.0", text)
+        r = m.count("1.0", "end", "update", "ypixels")
+        h = int((r[0] if isinstance(r, tuple) else r) or 0)
+        lh = self.reply_lh()
+        return max(lh, min(h, lh * 6))
 
     # ---- 답장에 이미지 붙이기 ----
     # 붙인 이미지는 사진 폴더에 파일로 두었다가, 보낼 때 감시 프로그램이 잠깐 포커스를 받아 입력창에 진짜로 붙여넣는다.
@@ -2645,57 +3506,120 @@ class Pet:
             self.reply_imgs += [p for p in got if p.lower().endswith(IMG_EXTS)]
         else:
             return None               # 이미지가 아니면 보통 글 붙여넣기
+        self.save_draft()
+        self._want_focus = True
         self.update_bubble(force=True)
         return "break"
 
-    def close_if_unfocused(self):
-        if self.detail is None or self._picking:
-            return
-        try:
-            inside = self.bubble.focus_get() is not None     # 다른 앱으로 가면 None
-        except (tk.TclError, KeyError):
-            inside = False
-        if not inside:
-            self.close_detail()
-
     def pick_image(self):
         from tkinter import filedialog
-        self._picking = True
-        try:
-            paths = filedialog.askopenfilenames(
-                parent=self.bubble, title=t("img_pick"),
-                filetypes=[(t("img_pick"), " ".join("*" + x for x in IMG_EXTS))])
-        finally:
-            self._picking = False
+        paths = filedialog.askopenfilenames(
+            parent=self.bubble, title=t("img_pick"),
+            filetypes=[(t("img_pick"), " ".join("*" + x for x in IMG_EXTS))])
         self.reply_imgs += [p.replace("/", "\\") for p in paths]
+        self.save_draft()
+        self._want_focus = True
         self.update_bubble(force=True)
 
     def drop_image(self, path):
         if path in self.reply_imgs:
             self.reply_imgs.remove(path)
+        self.save_draft()
+        self._want_focus = True
         self.update_bubble(force=True)
 
-    def focus_entry(self, ent):
+    def focus_entry(self, ent, pos="end"):
         # 투명 창은 그냥은 키보드를 못 받아서, 말풍선 창을 앞으로 올린 뒤 입력칸에 커서를 둔다
+        # pos: 커서 자리 ("end" 끝, 숫자·"줄.칸" 그 자리, None 그대로 — 누른 자리에 두기)
         try:
             hwnd = ctypes.windll.user32.GetParent(self.bubble.winfo_id())
             fg = ctypes.windll.user32.GetForegroundWindow()
             if fg and fg != hwnd:     # 그 전에 쓰던 창 (이미지를 붙인 뒤 포커스를 여기로 돌려놓는다)
                 self.prev_fg = fg
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            self.bubble.focus_force()
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                self.bubble.focus_force()
             ent.focus_set()
-            ent.icursor("end")
+            if pos is not None:
+                ent.mark_set("insert", pos)
+                ent.see("insert")
+            ime_font(ent)
         except tk.TclError:
             pass
 
+    def entry_focused(self):
+        """키보드 커서가 있는 로봇 입력칸 (없으면 None)."""
+        try:
+            w = self.bubble.focus_get()
+        except (tk.TclError, KeyError):
+            return None
+        return w if getattr(w, "is_reply", False) else None
+
+    def typing(self):
+        """입력칸에 글을 쓰는 중인지: 2.5초 안에 글자를 쳤거나, 커서가 입력칸에 있고 쓰던 글이 있으면."""
+        return (time.time() - self._typed_at < 2.5
+                or (self.entry_focused() is not None and bool(self.reply_var.get().strip())))
+
+    def ui_log(self, what, *sigs):
+        """입력하다 카드가 다시 만들어지는 일을 남긴다 (글자가 빠진다는 제보를 따라가려고). 무엇이 바뀌었는지만."""
+        new = sigs[-2] if len(sigs) >= 2 else None
+        old = sigs[-1] if sigs else None
+        diff = []
+        if isinstance(new, tuple) and isinstance(old, tuple):
+            diff = [f"{i}:{str(b)[:40]}→{str(a)[:40]}" for i, (a, b) in enumerate(zip(new, old)) if a != b]
+        line = f"{what} {' '.join(str(x) for x in sigs[:-2])} {diff}"
+        if line == getattr(self, "_ui_last", None):
+            return
+        self._ui_last = line
+        try:
+            p = os.path.join(APP_DIR, "ui.log")
+            if os.path.exists(p) and os.path.getsize(p) > 100_000:
+                os.remove(p)
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%m-%d %H:%M:%S ") + line + "\n")
+        except OSError:
+            pass
+
+    # ---- 쓰던 글 저장 (세션마다, 파일에도) ----
+    def load_draft(self, key):
+        self._draft_key = None                   # 바꾸는 동안은 저장하지 않게
+        d = self.drafts.get(key) or {}
+        self.reply_imgs = [p for p in d.get("imgs", []) if os.path.exists(p)]
+        self.reply_var.set(d.get("text", ""))
+        self._draft_key = key
+
+    def save_draft(self):
+        key = self._draft_key
+        if not key:
+            return
+        text = self.reply_var.get()
+        if text.strip() or self.reply_imgs:
+            self.drafts[key] = {"text": text, "imgs": list(self.reply_imgs), "t": time.time()}
+        elif self.drafts.pop(key, None) is None:
+            return
+        if getattr(self, "_draft_job", None):
+            self.root.after_cancel(self._draft_job)
+        self._draft_job = self.root.after(800, self.write_drafts)   # 칠 때마다 쓰지 않고 잠깐 모아서
+
+    def write_drafts(self):
+        self._draft_job = None
+        if len(self.drafts) > 30:                # 오래된 것부터 정리
+            for k in sorted(self.drafts, key=lambda k: self.drafts[k].get("t", 0))[:-30]:
+                del self.drafts[k]
+        try:
+            write_json(DRAFTS, self.drafts)
+        except OSError:
+            pass
+
     def open_detail(self, key):
+        self.load_draft(key)
         self.detail = key
         self.shown_at = time.time()
+        self._want_focus = True
         self.update_bubble(force=True)
 
     def close_detail(self):
         self.detail = None
+        self._draft_key = None                   # 닫힌 뒤 입력칸 글이 바뀌어도 저장된 글은 그대로
         self.update_bubble(force=True)
 
     def send_reply(self, key, text, other=False):
@@ -2712,8 +3636,8 @@ class Pet:
             return
         e["sending"] = True
         self.reply_key = key
+        self.reply_imgs = []                     # (이미지를 먼저 비워야 쓰던 글 저장에서도 같이 지워짐)
         self.reply_var.set("")
-        self.reply_imgs = []
         vs = e.get("entry") == "claude-vscode"
         if e.get("card"):            # 질문 카드: 고르고 제출 (기타면 글을 넣어서)
             GPT.card(e["title"], "" if other else text, text if other else "", vscode=vs)
@@ -2751,7 +3675,7 @@ class Pet:
         for w in parts:
             if getattr(w, "hl", False):
                 try:
-                    w.configure(fg=HOVER if on else FG)
+                    w.configure(fg=HOVER if on else getattr(w, "base", FG))
                 except tk.TclError:
                     pass
 
@@ -2761,8 +3685,9 @@ class Pet:
         self.position_bubble()
 
     def bubble_image(self, bw, bh, rect_w, rect_h, ty):
-        """4배로 크게 그린 뒤 줄여서 모서리를 매끈하게."""
-        k = 4
+        """크게 그린 뒤 줄여서 모서리를 매끈하게. 가장자리는 어차피 딱 끊으므로
+        펼친 카드처럼 큰 말풍선은 2배로만 (4배면 그리는 데 오래 걸려 펼칠 때 굼뜸)."""
+        k = 4 if bh < S(160) else 2
         img = Image.new("RGBA", (bw * k, bh * k), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         o = S(2)
