@@ -1,0 +1,10 @@
+{
+  "extDesc": {
+    "message": "Lets the TaskPet robot (Windows) know when ChatGPT, Gemini, Claude, Grok or Kimi is answering or done. Never reads your chats.",
+    "description": "Store/extension description (max 132 chars)"
+  },
+  "newChat": {
+    "message": "New chat",
+    "description": "Title shown on the robot when a chat has no title yet"
+  }
+}

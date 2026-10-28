@@ -1,0 +1,10 @@
+{
+  "extDesc": {
+    "message": "chatgpt.com·gemini.google.com·claude.ai·grok.com·kimi.ai에서 AI가 답을 쓰는 중인지, 끝났는지 TaskPet 로봇(Windows)에 알려 줍니다. 대화 내용은 읽지 않습니다.",
+    "description": "Store/extension description (max 132 chars)"
+  },
+  "newChat": {
+    "message": "새 채팅",
+    "description": "Title shown on the robot when a chat has no title yet"
+  }
+}

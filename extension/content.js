@@ -1,14 +1,21 @@
 // TaskPet — 이 탭의 ChatGPT / Gemini / Claude / Grok / Kimi가 답을 쓰는 중인지 살펴서 TaskPet 로봇에게 알린다.
 // 대화 내용은 읽지 않는다. 보내는 것: 사이트, 답변 중/끝남, 대화 주소(id), 대화 제목.
 
-// (Grok은 '모델 응답 중지') — '받아쓰기 중지' 같은 다른 버튼과 헷갈리지 않게 앞부분이 맞아야 한다
-const STOP_LABEL = /^(stop|중지|응답 중지|응답 생성 중지|모델 응답 중지|생성 중지|스트리밍 중지|대답 생성 중지|stop streaming|stop response|stop generating|stop model|停止)/i;
+// '중지' 버튼 이름 (Claude·Grok 은 이 이름으로만 답하는 중인지 안다) — 사이트 화면이 어느 언어여도 잡히게:
+// 한중일 글자(중지·停止·中止)는 어디에 있어도, 나머지 말은 낱말 첫머리면 '중지'로 본다.
+// 단, 받아쓰기·음성·녹음 버튼('받아쓰기 중지', 'Stop dictation' 등)은 뺀다
+const STOP_CJK = /중지|停止|中止|ストップ/;
+const STOP_WORD = /(?<![\p{L}\p{N}])(stop|detener|parar|interromp|arr[êe]t|anhalten|abbrechen|ferma|zatrzym|останов|стоп|hentikan|dừng|durdur)/iu;
+const NOT_STOP = /dict|diktat|diktier|ditad|dettat|voice|voz|voix|voce|stimme|sprach|голос|диктов|음성|받아쓰기|녹음|音声|録音|ディクテーション|语音|語音|录音|錄音|听写|聽寫|record|enregistr|aufnahme|grava|graba|registra|запис/i;
 const DONE_DELAY = 1500;   // 잠깐 멈췄다가 다시 쓰는 경우가 있어 이만큼 조용해야 끝으로 본다
+
+function isStopLabel(label) {
+  return (STOP_CJK.test(label) || STOP_WORD.test(label)) && !NOT_STOP.test(label);
+}
 
 function hasStopButton(selector) {
   for (const b of document.querySelectorAll(selector)) {
-    const label = (b.getAttribute('aria-label') || '').trim();
-    if (STOP_LABEL.test(label)) return true;
+    if (isStopLabel((b.getAttribute('aria-label') || '').trim())) return true;
   }
   return false;
 }
@@ -88,7 +95,7 @@ function editorHasStop() {
     for (let i = 0; i < 8 && box.parentElement; i++) box = box.parentElement;
   }
   for (const b of box.querySelectorAll('button[aria-label]')) {
-    if (STOP_LABEL.test(b.getAttribute('aria-label').trim())) return true;
+    if (isStopLabel(b.getAttribute('aria-label').trim())) return true;
   }
   return false;
 }
@@ -109,7 +116,12 @@ function title() {
   }
   // 탭 제목에서 ' - Claude' 같은 사이트 이름 꼬리는 뗀다
   const t = document.title.trim().replace(new RegExp(`\\s*[-–|]\\s*${S.plainTitle}$`), '');
-  return t && t !== S.plainTitle && t !== '새 세션' ? t.slice(0, 80) : '새 채팅';
+  return t && t !== S.plainTitle && t !== '새 세션' && t !== 'New session' ? t.slice(0, 80) : newChatName();
+}
+
+// 제목 없는 새 채팅 이름 — 브라우저 언어로 (_locales/*/messages.json 의 newChat)
+function newChatName() {
+  try { return chrome.i18n.getMessage('newChat') || 'New chat'; } catch (e) { return 'New chat'; }
 }
 
 const TITLE_WAIT = 60000; // 새 채팅은 답이 끝난 뒤에 제목이 붙기도 해서, 이만큼은 제목 변화를 더 본다

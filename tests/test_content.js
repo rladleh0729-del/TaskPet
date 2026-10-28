@@ -27,7 +27,8 @@ const ctx = {
   MutationObserver: class { observe() {} },
   setInterval() {}, setTimeout, clearTimeout,
   chrome: { runtime: { sendMessage(m, cb) { if (m.type === 'state') sent.push(m); else if (cb) cb({ connected: true }); },
-                       lastError: null } },
+                       lastError: null },
+            i18n: { getMessage: (k) => (k === 'newChat' ? '새 채팅' : '') } },   // 한국어 브라우저 흉내
   Date: { now: () => now },
   RegExp, JSON, console,
 };
@@ -49,4 +50,17 @@ page.pathname = '/c/zzz'; page.sidebar.zzz = '다른 대화'; step(1000);  // �
 if (sent.length !== n + 1) throw new Error('other conv ' + JSON.stringify(last()));
 page.pathname = '/c/abc'; page.sidebar.abc = '여행 계획 (수정)'; step(70000);  // 1분 지나면 더는 안 봄
 if (sent.length !== n + 1) throw new Error('after wait');
+
+// '중지' 버튼 이름: 여러 언어의 응답 중지는 잡고, 받아쓰기·녹음 중지나 다른 버튼은 안 잡는다
+const stop = (l) => vm.runInContext(`isStopLabel(${JSON.stringify(l)})`, ctx);
+for (const l of ['응답 중지', '모델 응답 중지', 'Stop response', 'Stop generating', '応答を停止', '停止生成', '停止回應',
+                 'Detener respuesta', 'Parar resposta', 'Interromper', 'Arrêter la réponse', 'Antwort stoppen', 'Stopp',
+                 'Interrompi la risposta', 'Остановить ответ', 'Стоп', 'Hentikan respons', 'Dừng phản hồi', 'Yanıtı durdur']) {
+  if (!stop(l)) throw new Error('중지 못 잡음: ' + l);
+}
+for (const l of ['받아쓰기 중지', '음성 입력 중지', 'Stop dictation', 'Stop recording', 'Stop voice mode', '音声入力を停止',
+                 '停止录音', 'Detener dictado', 'Arrêter la dictée', 'Diktat stoppen', 'Остановить запись',
+                 'Send', '보내기', 'Upload', 'Unstoppable', 'Bestop']) {
+  if (stop(l)) throw new Error('중지로 잘못 봄: ' + l);
+}
 console.log('통과', sent.map(m => m.state + ':' + m.title));

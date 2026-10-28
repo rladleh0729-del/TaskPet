@@ -1,0 +1,10 @@
+{
+  "extDesc": {
+    "message": "把 ChatGPT、Gemini、Claude、Grok、Kimi 的 AI 回答状态（回答中/已完成）告诉 TaskPet 桌面机器人（Windows）。不读取对话内容。",
+    "description": "Store/extension description (max 132 chars)"
+  },
+  "newChat": {
+    "message": "新聊天",
+    "description": "Title shown on the robot when a chat has no title yet"
+  }
+}

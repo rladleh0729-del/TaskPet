@@ -1,0 +1,10 @@
+{
+  "extDesc": {
+    "message": "ChatGPT・Gemini・Claude・Grok・KimiのAIが回答中か、回答し終えたかをTaskPetロボット(Windows)に知らせます。会話の内容は読みません。",
+    "description": "Store/extension description (max 132 chars)"
+  },
+  "newChat": {
+    "message": "新しいチャット",
+    "description": "Title shown on the robot when a chat has no title yet"
+  }
+}

@@ -67,9 +67,12 @@ async function onHost(msg) {
   }
 }
 
-// 처음 설치하면 TaskPet(Windows 프로그램) 받는 페이지를 연다 — 확장만으로는 로봇이 없어서 아무것도 안 보이므로
+// 처음 설치하면 TaskPet(Windows 프로그램) 받는 페이지를 연다 — 확장만으로는 로봇이 없어서 아무것도 안 보이므로.
+// 브라우저가 한국어가 아니면 영어 페이지로
 chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason === 'install') chrome.tabs.create({ url: 'https://querybot.kr/taskpet/#install' });
+  if (details.reason !== 'install') return;
+  const lang = /^ko/i.test(chrome.i18n.getUILanguage()) ? 'ko' : 'en';
+  chrome.tabs.create({ url: `https://querybot.kr/taskpet/?lang=${lang}#install` });
 });
 
 connect();

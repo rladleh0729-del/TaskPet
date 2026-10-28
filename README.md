@@ -16,7 +16,9 @@ AI 코딩 도구가 일하는 동안 화면 오른쪽 아래에서 상태를 알
 
 1. [Releases](../../releases)에서 `TaskPet.exe`를 내려받습니다.
 2. 실행하면 바로 설치되고 로봇이 나타납니다. 컴퓨터를 켤 때도 자동으로 실행됩니다.
+   받은 `TaskPet.exe`는 설치 파일입니다 — 프로그램을 `%LOCALAPPDATA%\TaskPet` 폴더에 한 번 풀어 두므로, 설치된 로봇은 켤 때마다 풀 필요 없이 바로(1초 안에) 뜹니다. 예전 버전이 임시 폴더에 남긴 `_MEI…` 폴더도 로봇이 정리합니다.
 3. 이미 열려 있던 Claude Code 세션은 새로 시작해야 잡힙니다.
+4. 로봇 화면 글은 Windows 언어에 맞춰 나옵니다(한국어·English·日本語·简体中文·繁體中文·Español·Português·Français·Deutsch·Русский). 바꾸려면 우클릭 → **설정 → 언어 · Language**.
 
 ### 브라우저 ChatGPT·Gemini·Claude·Grok·Kimi도 보려면 (선택)
 
@@ -49,6 +51,7 @@ Chrome·Brave·Edge가 있는데 확장이 없으면 로봇에 초록 **"브라�
   - **말풍선 자동 숨기기**: 안 함 / 10초 / 30초 / 1분 뒤. 새 알림이 오면 다시 나타나고, 말풍선 위에 마우스를 올려 두거나 보낼 글을 쓰는 동안은 숨기지 않습니다.
   - **화면에 보이는 세션은 알리지 않기**(기본 켬): 창이 화면에 보이면(맨 앞이 아니어도, 나란히 띄워 둔 경우 포함) 그 줄을 숨기고 소리도 내지 않습니다. VS Code는 Claude Code 세션 줄 모두, Claude 앱과 ChatGPT 앱(일반 채팅·Codex)은 지금 띄워 둔 그 대화 줄만.
   - **끝난 답변 미리보기**(기본 켬) · **소리 끄기**
+  - **언어 · Language**: 자동(Windows 설정) 또는 10개 언어 중 하나. 고르면 로봇이 그 언어로 다시 켜집니다.
 - 줄 맨 앞의 작은 아이콘으로 어느 AI인지 구분됩니다 (Claude 주황 빛살, GPT 매듭, Gemini 별, Grok 사선, Kimi K). 각 회사를 떠올리게 직접 그린 모양이며, 공식 로고 파일이 아닙니다.
 
 ## 제거
@@ -74,7 +77,7 @@ pip install pillow pyinstaller
 python build.py
 ```
 
-`dist\TaskPet.exe`가 만들어집니다. 훅, ChatGPT·Claude 앱 감시, Native Messaging 연결 프로그램은 Windows에 기본으로 있는 C# 컴파일러(.NET Framework 4)로 빌드합니다.
+`dist\TaskPet.exe`(설치 파일)가 만들어집니다. 로봇은 PyInstaller 폴더판으로 만들고, 그 폴더를 zip으로 묶어 작은 C# 설치 프로그램(`src\setup.cs`) 안에 넣습니다. 훅, ChatGPT·Claude 앱 감시(COM UI Automation), Native Messaging 연결 프로그램, 설치 프로그램은 Windows에 기본으로 있는 C# 컴파일러(.NET Framework 4)로 빌드합니다.
 창 없는 프로그램이라 오류가 나면 설치 폴더(`%LOCALAPPDATA%\TaskPet`)의 `error.log`에 기록됩니다.
 
 ---
@@ -83,11 +86,12 @@ python build.py
 
 TaskPet is a tiny orange pixel robot that sits at the bottom right of your screen and shows what your AI coding agents are doing: **working**, **waiting for your approval** (red, with a sound), or **done** (green, with a short chime). It supports **Claude Code** (desktop app, terminal and VS Code), **regular chats in the Claude desktop app**, **Codex** (ChatGPT desktop app / Codex CLI) and **regular ChatGPT chats** in the desktop app, on Windows 10/11. Claude rows are labeled in orange, Codex and ChatGPT rows in blue. When Claude Code in the Claude desktop app stops with a multiple-choice question, the question and its choices appear under the row — click one (or type under "Other") to answer that session without bringing the app to the front. Hover a row to highlight it; a green "new version" row appears when an update is available — double-click it to update.
 
-- Download `TaskPet.exe` from Releases and run it. It installs itself and starts with Windows.
+- Download `TaskPet.exe` from Releases and run it. It is a small installer: it unpacks TaskPet once into `%LOCALAPPDATA%\TaskPet` and starts with Windows, so the installed robot starts in well under a second.
+- The robot speaks 10 languages (Korean, English, Japanese, Simplified/Traditional Chinese, Spanish, Portuguese, French, German, Russian) and follows your Windows language. Change it from right-click → **Settings → Language**; the robot restarts in that language.
 - Click the robot to hide/show the bubble, drag it to move (the position is remembered), mute sounds from the right-click menu, small hand-drawn icons (not official logos) show which AI each row is from, double-click a row to jump to that chat, right-click for the menu.
 - Uninstall from the right-click menu or Windows Settings → Apps. All hooks it added are removed; your other settings stay untouched.
 - Claude Code is tracked through hooks it appends to `~/.claude/settings.json` (backed up first). Codex is tracked by reading `~/.codex/sessions` only. Regular ChatGPT chats leave no local record, so a small helper reads the ChatGPT window through Windows UI Automation every 2 seconds and only looks for the "working" indicator next to chat titles in the sidebar (the ChatGPT window must be open); the same helper reads the Claude desktop app's sidebar for the "running" indicator while its chat view is shown. Nothing leaves your computer; the only network access is a check of the latest GitHub release every 10 minutes.
-- Optional, for chatgpt.com, gemini.google.com, claude.ai, grok.com and kimi.ai in Chrome/Brave/Edge: install **[TaskPet for AI Chats from the Chrome Web Store](https://chromewebstore.google.com/detail/ojhigjdohhpkdkolpeeobffggkejpakn)** (right-click the robot → **브라우저 확장 설치** opens the same page), then fully restart the browser. The extension only checks whether the "Stop" button is present and passes the state (title, URL) to TaskPet through Native Messaging (`taskpet-native.exe`). It never reads message content.
+- Optional, for chatgpt.com, gemini.google.com, claude.ai, grok.com and kimi.ai in Chrome/Brave/Edge: install **[TaskPet for AI Chats from the Chrome Web Store](https://chromewebstore.google.com/detail/ojhigjdohhpkdkolpeeobffggkejpakn)** (right-click the robot → **Install browser extension (Web Store)** opens the same page; the extension is also translated into 10 languages), then fully restart the browser. The extension only checks whether the "Stop" button is present and passes the state (title, URL) to TaskPet through Native Messaging (`taskpet-native.exe`). It never reads message content.
 
 Not affiliated with Anthropic or OpenAI. "Claude", "Codex" and "ChatGPT" are trademarks of their respective owners.
 

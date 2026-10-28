@@ -398,10 +398,43 @@ with open(tp8, "w", encoding="utf-8") as f:
     for r in recs:
         f.write(json.dumps(r, ensure_ascii=False) + "\n")
 turns, _ = taskpet.claude_turns(tp8)
-assert turns[0]["me"] == "봐 줘\n(이미지)" and turns[0]["imgs"] == ["AAAA"], turns[0]
-assert turns[0]["parts"] == [("text", "화면을 볼게요"), ("tools", [("read", "shot.png")]), ("image", "BBBB"),
-                             ("text", "잘 보여요")], turns[0]["parts"]
-assert turns[1]["me"] == "이것도\n(이미지)" and turns[1]["imgs"] == ["AAAA"], turns[1]
+# 그림은 base64 글자 대신 기록 파일 안 자리만 들고 있다가, 보여 줄 때 그 한 줄만 다시 읽어 꺼낸다
+img = lambda ref: taskpet.claude_image(tp8, ref)
+assert turns[0]["me"] == "봐 줘\n(이미지)" and [img(x) for x in turns[0]["imgs"]] == ["AAAA"], turns[0]
+parts = [(k, img(v) if k == "image" else v) for k, v in turns[0]["parts"]]
+assert parts == [("text", "화면을 볼게요"), ("tools", [("read", "shot.png")]), ("image", "BBBB"),
+                 ("text", "잘 보여요")], turns[0]["parts"]
+assert turns[1]["me"] == "이것도\n(이미지)" and [img(x) for x in turns[1]["imgs"]] == ["AAAA"], turns[1]
+assert img("0:u5") is None and img("엉뚱한") is None and taskpet.claude_image(tp8 + ".없음", "0:u0") is None
+# 이어 읽기: 읽던 자리(state)를 넘기면 새로 붙은 줄만 읽어 이어 붙인다 (일하는 동안 1초마다 다시 읽지 않게)
+tp9 = os.path.join(tmp, "chat3.jsonl")
+with open(tp9, "w", encoding="utf-8") as f:
+    f.write(json.dumps({"type": "user", "message": {"content": "첫 질문"}}, ensure_ascii=False) + "\n")
+    f.write(json.dumps(tool("r1", "Read", file_path="C:\\a\\x.py"), ensure_ascii=False) + "\n")
+st = {}
+turns, more = taskpet.claude_turns(tp9, state=st)
+assert len(turns) == 1 and not more and turns[0]["open"] == ("read", "x.py") and st["off"] == os.path.getsize(tp9)
+with open(tp9, "a", encoding="utf-8") as f:
+    f.write(json.dumps(done("r1")) + "\n")
+    f.write(json.dumps({"type": "user", "message": {"content": "둘째 질문"}}, ensure_ascii=False) + "\n")
+    f.write(json.dumps(tool("e1", "Edit", file_path="C:\\a\\y.py"), ensure_ascii=False) + "\n")
+    f.write('{"type": "assistant", "message": {"content": [{"type": "text", "text": "아직 쓰는')   # 끝 안 난 줄
+again, _ = taskpet.claude_turns(tp9, state=st)
+assert again is turns and [x["me"] for x in turns] == ["첫 질문", "둘째 질문"], turns
+assert turns[0]["open"] is None and turns[1]["open"] == ("edit", "y.py"), turns   # 지금 하는 일은 마지막 대화에만
+assert st["off"] < os.path.getsize(tp9)          # 쓰는 중인 마지막 줄은 아직 안 읽음
+with open(tp9, "a", encoding="utf-8") as f:
+    f.write(' 중"}]}}\n')
+taskpet.claude_turns(tp9, state=st)
+assert turns[1]["ai"] == ["아직 쓰는 중"] and turns[1]["open"] is None and st["off"] == os.path.getsize(tp9), turns
+assert taskpet.claude_turns(tp9)[0][1]["ai"] == ["아직 쓰는 중"]    # 처음부터 읽어도 같은 결과
+# 계획도 한 줄씩: 쓰는 중인 마지막 줄은 다음에 (읽은 위치가 줄 끝에 멈춤)
+with open(tp9, "a", encoding="utf-8") as f:
+    f.write(json.dumps(tool("p1", plan_tool, items=[{"content": "하나", "status": "in_progress"}])) + "\n")
+    f.write('{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "' + plan_tool)
+plan, _ = taskpet.claude_plan(tp9)
+assert [x["content"] for x in plan] == ["하나"] and taskpet._PLAN_CACHE[tp9][0] < os.path.getsize(tp9), plan
+assert taskpet.proc_private_bytes(os.getpid()) > 10 * 2**20 and taskpet.proc_private_bytes(0) == 0
 assert taskpet.tool_kind("mcp__claude-in-chrome__navigate", {})[0] == "browser"
 assert taskpet.tool_kind("ToolSearch", {})[0] is None
 assert taskpet.fmt_short(35) == "35초" and taskpet.fmt_short(200) == "3분" and taskpet.fmt_short(7300) == "2시간"
@@ -455,4 +488,22 @@ assert list(tr3.tasks) == ["c:new1"]
 tr3.tasks, tr3.dismissed = {}, {"c:new1": time.time()}
 tr3.add_recent_claude()
 assert tr3.tasks == {}                             # 지운 뒤 새 일이 없으면 안 띄움
+
+# 다른 언어들: 번역표 열쇠·자리표시({d} 등)가 영어와 같고, 시간·도구 글이 그 언어로
+import re  # noqa: E402
+for lang, tab in taskpet.TR.items():
+    for k, v in tab.items():
+        assert k in taskpet.T, (lang, k)
+        assert set(re.findall(r"{\w+}", v)) == set(re.findall(r"{\w+}", taskpet.T[k][1])), (lang, k)
+    assert lang in taskpet.UNITS and lang in taskpet.TOOL_TR, lang
+assert [c for c, _ in taskpet.LANG_NAMES] == ["ko", "en"] + list(taskpet.TR)
+saved = taskpet.LANG, taskpet.KO
+taskpet.LANG, taskpet.KO = "ja", False
+assert taskpet.fmt_dur(185) == "3分5秒" and taskpet.tool_doing(("read", "a.py")) == "読み込み中 a.py"
+assert taskpet.t("img_tag") == "(画像)" and taskpet.t("reply_send") == "➤"   # 없는 글은 영어(같은 기호)
+taskpet.LANG, taskpet.KO = "de", False
+assert taskpet.fmt_short(7300) == "2 Std." and taskpet.t("done_short", d="5 s") == "fertig · vor 5 s"
+taskpet.LANG, taskpet.KO = "ko", False                # 한국어 PC에서 KO 만 끈 그림 만들기 = 영어
+assert taskpet.t("quit") == "Quit" and taskpet.fmt_short(35) == "35s"
+taskpet.LANG, taskpet.KO = saved
 print("통과", events)

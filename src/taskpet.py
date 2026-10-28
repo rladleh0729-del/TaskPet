@@ -35,8 +35,10 @@ from datetime import datetime, timedelta
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+from i18n import FONTS, LANG_NAMES, TOOL_TR, TR, UNITS
+
 APP = "TaskPet"
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
@@ -68,7 +70,25 @@ CODEX_DIR = os.path.join(HOME, ".codex")
 NO_WINDOW = 0x08000000
 
 # ---- 언어 ----
-KO = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0xFF == 0x12
+# 설정 메뉴에서 고른 언어(settings.json 의 "lang"), 없으면 Windows 표시 언어. 한국어·영어는 아래 T 표, 나머지는 i18n.py
+def pick_lang():
+    try:
+        with open(SETTINGS, encoding="utf-8") as f:
+            v = json.load(f).get("lang")
+        if v in dict(LANG_NAMES):
+            return v
+    except (OSError, ValueError, AttributeError):
+        pass
+    lid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+    main_id, sub = lid & 0x3FF, lid >> 10
+    if main_id == 0x04:                                   # 중국어: 대만·홍콩·마카오는 번체
+        return "zh_TW" if sub in (0x01, 0x03, 0x05) else "zh_CN"
+    return {0x12: "ko", 0x11: "ja", 0x0a: "es", 0x16: "pt_BR", 0x0c: "fr",
+            0x07: "de", 0x19: "ru"}.get(main_id, "en")
+
+
+LANG = pick_lang()
+KO = LANG == "ko"
 T = {
     "working": ("{d} 진행 중", "working {d}"),
     "working_short": ("진행 {d}", "working {d}"),
@@ -130,11 +150,27 @@ T = {
     "ask_uninstall": ("TaskPet을 제거할까요?\nClaude Code 훅 설정과 자동 실행도 함께 지워집니다.",
                       "Uninstall TaskPet?\nIts Claude Code hooks and auto-start will be removed."),
     "uninstalled": ("TaskPet을 제거했습니다.", "TaskPet has been uninstalled."),
+    "img_tag": ("(이미지)", "(image)"),
+    "src_claudeweb": ("Claude 웹", "Claude Web"),
+    "src_claudechat": ("Claude 채팅", "Claude Chat"),
+    "src_chatweb": ("ChatGPT 웹", "ChatGPT Web"),
+    "install_failed": ("설치 중 오류가 났습니다:\n\n", "Install failed:\n\n"),
+    "lang_menu": ("언어 · Language", "Language"),
+    "lang_auto": ("자동 (Windows 설정)", "Automatic (Windows setting)"),
 }
 
 
+def ui_lang():
+    """지금 화면 언어. KO 를 바꿔 쓰는 그림 만들기 도구(make_scenes)를 위해 KO 를 먼저 본다."""
+    return "ko" if KO else ("en" if LANG == "ko" else LANG)
+
+
 def t(key, **kw):
-    return T[key][0 if KO else 1].format(**kw)
+    if KO:
+        s = T[key][0]
+    else:
+        s = TR.get(ui_lang(), {}).get(key) or T[key][1]
+    return s.format(**kw)
 
 
 def msgbox(text, flags=0x40):
@@ -271,7 +307,7 @@ WEB_SITES = {"chatgpt": ("chatweb", "ChatGPT"), "gemini": ("gemini", "Gemini"),
 WEB_SRCS = tuple(src for src, _ in WEB_SITES.values())
 BROWSER_NAME = {"chrome": "Chrome", "brave": "Brave", "msedge": "Edge", "chromium": "Chromium",
                 "vivaldi": "Vivaldi", "opera": "Opera", "whale": "Whale"}
-FONT = "맑은 고딕" if KO else "Segoe UI"
+FONT = FONTS.get(LANG, "Segoe UI")   # 한국어 맑은 고딕, 일본어·중국어는 그 글자용 Windows 글꼴
 REPLY_FONT = (FONT, 10)   # 로봇 입력칸 글씨: Claude 글 칸과 같은 글씨체·크기
 
 
@@ -513,26 +549,22 @@ def robot_image(mode, w, h, blink=False, arm_up=0, hard=True):
 
 
 def fmt_dur(sec):
+    """3분 5초 / 3m 5s / 3分5秒 …"""
     sec = max(0, int(sec))
-    if KO:
-        if sec < 60:
-            return f"{sec}초"
-        if sec < 3600:
-            return f"{sec // 60}분 {sec % 60}초"
-        return f"{sec // 3600}시간 {sec % 3600 // 60}분"
+    s_, m_, h_, a, b = UNITS.get(ui_lang(), UNITS["en"])
     if sec < 60:
-        return f"{sec}s"
+        return f"{sec}{a}{s_}"
     if sec < 3600:
-        return f"{sec // 60}m {sec % 60}s"
-    return f"{sec // 3600}h {sec % 3600 // 60}m"
+        return f"{sec // 60}{a}{m_}{b}{sec % 60}{a}{s_}"
+    return f"{sec // 3600}{a}{h_}{b}{sec % 3600 // 60}{a}{m_}"
 
 
 def fmt_short(sec):
     """목록용 짧은 시간: 35초 / 3분 / 2시간."""
     sec = max(0, int(sec))
-    if KO:
-        return f"{sec}초" if sec < 60 else f"{sec // 60}분" if sec < 3600 else f"{sec // 3600}시간"
-    return f"{sec}s" if sec < 60 else f"{sec // 60}m" if sec < 3600 else f"{sec // 3600}h"
+    s_, m_, h_, a, _ = UNITS.get(ui_lang(), UNITS["en"])
+    return (f"{sec}{a}{s_}" if sec < 60 else f"{sec // 60}{a}{m_}" if sec < 3600
+            else f"{sec // 3600}{a}{h_}")
 
 
 def answer_lines(text):
@@ -583,10 +615,12 @@ SOUNDS = {
 }
 
 
-def make_sounds():
+def make_sounds(missing_only=False):
     rate = 44100
     for name, notes in SOUNDS.items():
         path = os.path.join(APP_DIR, f"{name}.wav")
+        if missing_only and os.path.exists(path):
+            continue
         total = max(s + d for s, _, d, _ in notes)
         buf = [0.0] * int(rate * total)
         for start, freq, dur, amp in notes:
@@ -815,8 +849,8 @@ def stop_running_widget(folder):
 
 
 def copy_retry(src, dst):
-    """실행 중이던 옛 TaskPet이 완전히 꺼질 때까지 잠깐 기다리며 덮어쓴다."""
-    for _ in range(50):
+    """실행 중이던 옛 TaskPet이 완전히 꺼질 때까지 잠깐(최대 2초) 기다리며 덮어쓴다."""
+    for _ in range(10):
         try:
             shutil.copy2(src, dst)
             return
@@ -829,8 +863,17 @@ def copy_retry(src, dst):
     shutil.copy2(src, dst)
 
 
+def remove_old_extracts():
+    """한 파일(onefile) 시절 TaskPet 이 켤 때마다 임시 폴더에 풀고 못 지운 _MEI 폴더(하나에 70MB쯤)를 치운다.
+    TaskPet 훅 프로그램이 든 폴더만 지운다 (다른 프로그램의 _MEI 는 건드리지 않음)."""
+    me = os.path.normcase(getattr(sys, "_MEIPASS", ""))
+    for d in glob.glob(os.path.join(tempfile.gettempdir(), "_MEI*")):
+        if os.path.normcase(d) != me and os.path.isfile(os.path.join(d, HOOK_EXE)):
+            shutil.rmtree(d, ignore_errors=True)
+
+
 def remove_old_copies(folder):
-    for p in glob.glob(os.path.join(folder, "*.old")):
+    for p in glob.glob(os.path.join(folder, "**", "*.old"), recursive=True):
         try:
             os.remove(p)
         except OSError:
@@ -841,8 +884,7 @@ def install():
     try:
         _install()
     except Exception as ex:
-        msgbox(("설치 중 오류가 났습니다:\n\n" if KO else "Install failed:\n\n")
-               + f"{type(ex).__name__}: {ex}", 0x10)
+        msgbox(t("install_failed") + f"{type(ex).__name__}: {ex}", 0x10)
 
 
 def _install():
@@ -851,16 +893,21 @@ def _install():
     exe = os.path.join(INSTALL_DIR, "TaskPet.exe")
     updating = os.path.exists(exe)
     remove_old_copies(INSTALL_DIR)
-    copy_retry(sys.executable, exe)
+    # 폴더판: 풀린 폴더(TaskPet.exe + _internal + 훅·감시·연결 프로그램 + 브라우저 확장 압축 해제본)를 통째로 복사.
+    # 예전 버전의 파이썬 부품은 먼저 지워 섞이지 않게 (못 지운 파일은 copy_retry 가 비켜 두고 덮음)
+    shutil.rmtree(os.path.join(INSTALL_DIR, "_internal"), ignore_errors=True)
+    for base, _, files in os.walk(APP_DIR):
+        dst = os.path.normpath(os.path.join(INSTALL_DIR, os.path.relpath(base, APP_DIR)))
+        os.makedirs(dst, exist_ok=True)
+        for name in files:
+            copy_retry(os.path.join(base, name), os.path.join(dst, name))
+    for p in glob.glob(os.path.join(INSTALL_DIR, "*.wav")):   # 알림 소리는 새 버전이 켜질 때 다시 만든다
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     hook = os.path.join(INSTALL_DIR, HOOK_EXE)
-    copy_retry(os.path.join(sys._MEIPASS, HOOK_EXE), hook)
-    copy_retry(os.path.join(sys._MEIPASS, GPT_EXE), os.path.join(INSTALL_DIR, GPT_EXE))
-    copy_retry(os.path.join(sys._MEIPASS, NATIVE_EXE), os.path.join(INSTALL_DIR, NATIVE_EXE))
     register_native_host()
-    # 브라우저 확장(압축 해제본)도 설치 폴더에 넣어 둔다 → 브라우저에서 '압축해제된 확장 로드'로 고르면 됨
-    ext_src = os.path.join(sys._MEIPASS, "chrome-extension")
-    if os.path.isdir(ext_src):
-        shutil.copytree(ext_src, os.path.join(INSTALL_DIR, "chrome-extension"), dirs_exist_ok=True)
 
     result = install_claude_hooks(hook)
 
@@ -917,6 +964,8 @@ def uninstall(ask=True, from_widget=False):
 def claude_local_id(sid):
     """Claude 앱 로그에서 세션 ID → 앱 내부(local_) ID를 찾는다 (비공식)."""
     found = None
+    pat = re.compile(rb"Mapping internal session (local_[A-Za-z0-9-]+) to CLI session "
+                     + re.escape(sid.encode("utf-8")))
     for base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("APPDATA", "")):
         for name in ("main.log.old", "main.log"):
             p = os.path.join(base, "Claude", "logs", name)
@@ -924,48 +973,98 @@ def claude_local_id(sid):
                 size = os.path.getsize(p)
                 with open(p, "rb") as f:
                     f.seek(max(0, size - 8_000_000))
-                    text = f.read().decode("utf-8", "ignore")
-                for m in re.finditer(r"Mapping internal session (local_[A-Za-z0-9-]+)"
-                                     r" to CLI session " + re.escape(sid), text):
-                    found = m.group(1)
+                    for line in f:               # 한 줄씩 (8MB 로그를 통째로 글자로 바꾸지 않게)
+                        m = pat.search(line) if b"Mapping internal session" in line else None
+                        if m:
+                            found = m.group(1).decode("ascii")
             except OSError:
                 pass
     return found
+
+
+class _MemCounters(ctypes.Structure):     # PROCESS_MEMORY_COUNTERS_EX
+    _fields_ = [("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong)] + [
+        (n, ctypes.c_size_t) for n in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                       "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                       "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage",
+                                       "PrivateUsage")]
+
+
+def proc_private_bytes(pid):
+    """그 프로세스만 쓰는 메모리 (작업 관리자의 '메모리'와 비슷). 모르면 0."""
+    k = ctypes.WinDLL("kernel32")
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.K32GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MemCounters), ctypes.c_ulong]
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    h = k.OpenProcess(0x1000, False, pid)        # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return 0
+    try:
+        m = _MemCounters()
+        m.cb = ctypes.sizeof(m)
+        return m.PrivateUsage if k.K32GetProcessMemoryInfo(h, ctypes.byref(m), m.cb) else 0
+    finally:
+        k.CloseHandle(h)
 
 
 class ChatGptWatcher:
     """taskpet-chatgpt.exe를 띄워 두고, ChatGPT 창에서 '작업 중'인 대화 제목 목록을 받는다.
     일반 채팅은 컴퓨터에 기록이 남지 않아 창을 화면 읽기 기능으로 읽는 수밖에 없다."""
 
+    MEM_LIMIT = 150 * 2**20   # 감시 프로그램이 이보다 커지면 새로 띄운다 (보통 20~30MB)
+
     def __init__(self):
         self.report = None        # 가장 최근 {"ok", "hwnd", "working"}
         self.fresh = False
         self.proc = None
-        exe = next((p for p in (os.path.join(APP_DIR, GPT_EXE),
-                                os.path.join(APP_DIR, "..", "build", GPT_EXE))
-                    if os.path.exists(p)), None)
-        if not exe:
+        self.sent_at = 0.0        # 답 보내기·카드 명령을 보낸 시각 (결과가 오면 0)
+        self.exe = next((p for p in (os.path.join(APP_DIR, GPT_EXE),
+                                     os.path.join(APP_DIR, "..", "build", GPT_EXE))
+                         if os.path.exists(p)), None)
+        self.launch()
+
+    def launch(self):
+        if not self.exe:
             return
         try:
             self.proc = subprocess.Popen(
-                [exe, str(os.getpid())], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                [self.exe, str(os.getpid())], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
         except OSError:
+            self.proc = None
             return
         import threading
-        threading.Thread(target=self._read, daemon=True).start()
+        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
 
-    def _read(self):
-        for line in self.proc.stdout:
+    def _read(self, proc):
+        for line in proc.stdout:
             try:
                 obj = json.loads(line.decode("utf-8", "ignore"))
             except Exception:
                 continue
             if "reply" in obj:            # 답 보내기 결과
                 self.reply_result = obj["reply"]
+                self.sent_at = 0.0
             else:
                 self.report = obj
                 self.fresh = True
+
+    def check_memory(self):
+        """만일을 위한 안전장치: 감시 프로그램이 한도를 넘으면 하던 명령이 없을 때 새로 띄운다.
+        (1.6.2까지는 .NET 화면 읽기가 2초마다 윈도우 쪽 메모리를 조금씩 흘려 1분에 약 1.2MB씩 늘었다.
+        1.6.3부터 COM 화면 읽기로 바꿔 평평하므로 보통은 여기까지 오지 않는다.)"""
+        p = self.proc
+        if not (p and p.poll() is None) or (self.sent_at and time.time() - self.sent_at < 120):
+            return False
+        if proc_private_bytes(p.pid) < self.MEM_LIMIT:
+            return False
+        try:
+            p.kill()
+            p.wait(5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        self.launch()
+        return True
 
     def reply(self, title, text, vscode=False, images=(), restore=0):
         """Claude 앱(또는 VS Code)의 그 세션에 글을 넣어 보낸다 (창은 앞으로 가져오지 않음). 결과는 take_reply().
@@ -982,6 +1081,7 @@ class ChatGptWatcher:
             ctypes.windll.user32.AllowSetForegroundWindow(self.proc.pid)
             self.proc.stdin.write(f"{cmd}\t{title}\t{b64}\t{imgs}\t{int(restore or 0)}\n".encode("utf-8"))
             self.proc.stdin.flush()
+            self.sent_at = time.time()
         except OSError:
             self.reply_result = t("reply_nohelper")
 
@@ -996,6 +1096,7 @@ class ChatGptWatcher:
             cmd = "cardvscode" if vscode else "cardclaude"
             self.proc.stdin.write(f"{cmd}\t{title}\t{enc(label)}\t{enc(other)}\n".encode("utf-8"))
             self.proc.stdin.flush()
+            self.sent_at = time.time()
         except OSError:
             self.reply_result = t("reply_nohelper")
 
@@ -1182,7 +1283,7 @@ def clean_prompt(p):
         return None
     p = " ".join(IMAGE_MARK.sub(" ", p).split())
     # 글이 하나도 없으면 이미지(또는 파일)만 보낸 것
-    return p[:80] if p else "(이미지)"
+    return p[:80] if p else t("img_tag")
 
 
 BG_START = re.compile(rb"Command running in background with ID: ([A-Za-z0-9]+)"
@@ -1332,7 +1433,7 @@ def user_said(rec):
             if isinstance(p, dict) and p.get("type") == "text"]
     said = [x for x in said if x and not x.startswith(("<", "[Image", "[Request interrupted"))]
     if any(isinstance(p, dict) and p.get("type") == "image" for p in content):
-        said.append("(이미지)")
+        said.append(t("img_tag"))
     return "\n".join(said) if said else None
 
 
@@ -1354,90 +1455,137 @@ def rec_images(rec):
     return images_in(msg.get("content") if isinstance(msg, dict) else None)
 
 
-def claude_turns(transcript, tail_bytes=1_500_000):
+def result_images(rec):
+    """도구 결과(예: 그림 파일 읽기)가 돌려준 그림들."""
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    return [b for part in (content if isinstance(content, list) else [])
+            if isinstance(part, dict) and part.get("type") == "tool_result"
+            for b in images_in(part.get("content"))]
+
+
+def claude_image(transcript, ref):
+    """claude_turns 가 남긴 그림 자리 → base64 글자 (없으면 None).
+    자리 = "줄 위치:u번호"(내가 붙인 그림) 또는 "줄 위치:r번호"(도구 결과 그림) — 그 한 줄만 다시 읽는다."""
+    try:
+        off, which = ref.split(":")
+        with open(transcript, "rb") as f:
+            f.seek(int(off))
+            rec = json.loads(f.readline())
+        return (rec_images(rec) if which[0] == "u" else result_images(rec))[int(which[1:])]
+    except (OSError, ValueError, IndexError, AttributeError, TypeError):
+        return None
+
+
+def claude_turns(transcript, tail_bytes=1_500_000, state=None):
     """대화를 차례대로 (끝에서 tail_bytes 만큼만 읽음). 위로 스크롤하면 tail_bytes 를 늘려 다시 부른다.
+    state(dict)를 넘기면 읽은 자리를 거기 기억했다가, 다음에 같은 파일·같은 tail_bytes 로 부를 때
+    새로 붙은 줄만 읽어 이어 붙인다 (일하는 동안 1초마다 수십 MB 를 다시 읽지 않게).
+    파일은 한 줄씩 읽어서 큰 기록도 한꺼번에 메모리에 올리지 않는다.
     돌려주는 값: (대화 목록, 앞에 더 있는지). 대화 하나 =
-      {"me": 내 메시지, "imgs": 내가 붙인 그림들(base64), "t0": 보낸 시각, "ai": [Claude 글들],
-       "parts": [("text", 글) | ("tools", [(종류, 대상)…]) | ("image", base64)…] (나온 차례대로),
-       "open": 결과가 아직 안 온 마지막 도구 (종류, 대상) 또는 None}"""
+      {"me": 내 메시지, "imgs": 내가 붙인 그림 자리들, "t0": 보낸 시각, "ai": [Claude 글들],
+       "parts": [("text", 글) | ("tools", [(종류, 대상)…]) | ("image", 그림 자리)…] (나온 차례대로),
+       "open": 결과가 아직 안 온 마지막 도구 (종류, 대상) 또는 None}
+    그림은 base64 글자(그림 하나에 수백 KB)를 들고 있지 않고 자리만 — 보여 줄 때 claude_image 로 꺼낸다."""
+    st = state if state is not None else {}
     try:
         size = os.path.getsize(transcript)
-        with open(transcript, "rb") as f:
-            f.seek(max(0, size - tail_bytes))
-            tail = f.read()
     except OSError:
         return [], False
-    more = size > tail_bytes
-    lines = tail.splitlines()
-    if more and lines:
-        lines = lines[1:]                        # 잘린 첫 줄
-    turns, cur = [], None
-    results, last_tool = set(), None             # 결과가 온 도구들, 마지막으로 부른 도구
+    # 다른 파일·다른 양이거나, 파일이 줄었거나, 너무 길게 이어 붙었으면 끝에서부터 새로
+    if (st.get("path") != transcript or st.get("tail") != tail_bytes or size < st.get("off", 0)
+            or size - st.get("start", 0) > tail_bytes * 2):
+        start = max(0, size - tail_bytes)
+        st.clear()
+        st.update(path=transcript, tail=tail_bytes, start=start, off=start, skip=start > 0,
+                  turns=[], cur=None, results=set(), last_tool=None, open_turn=None)
+    turns, results = st["turns"], st["results"]     # results = 결과가 온 도구들
+    cur, last_tool = st["cur"], st["last_tool"]     # last_tool = 마지막으로 부른 도구
 
     def new_turn(me, ts, imgs=()):
         turn = {"me": me, "t0": ts, "imgs": list(imgs), "ai": [], "parts": [], "open": None}
         turns.append(turn)
         return turn
 
-    for line in lines:
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        said = user_said(rec)
-        if said:
-            cur = new_turn(said, rec_time(rec), rec_images(rec))
-            continue
-        if not isinstance(rec, dict) or rec.get("isSidechain"):
-            continue
-        msg = rec.get("message")
-        content = (msg.get("content") if isinstance(msg, dict) else None) or []
-        if rec.get("type") == "user":
-            for part in content if isinstance(content, list) else []:
-                if isinstance(part, dict) and part.get("type") == "tool_result":
-                    results.add(part.get("tool_use_id"))
-                    if cur is not None:          # 도구가 돌려준 그림 (예: 이미지 파일 읽기) → 그 자리에 작게
-                        cur["parts"] += [("image", b) for b in images_in(part.get("content"))]
-            continue
-        if rec.get("type") != "assistant" or not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            kind = part.get("type")
-            if kind not in ("text", "tool_use", "thinking"):
-                continue
-            # 긴 작업 중 Claude 앱이 보여 주는 진행 안내 글은 '생각' 칸(thinking)에 글로 남는 일이 많다
-            # (내용 없는 thinking 은 숨긴 생각이라 건너뜀)
-            text = str(part.get("text" if kind == "text" else "thinking") or "").strip()
-            if kind == "thinking":
-                if not text:
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(st["off"])
+            if st["skip"]:                       # 잘린 첫 줄
+                st["off"] += len(f.readline())
+                st["skip"] = False
+            for line in f:
+                if not line.endswith(b"\n"):     # 아직 쓰는 중인 마지막 줄은 다음에
+                    break
+                at = st["off"]
+                st["off"] += len(line)
+                try:
+                    rec = json.loads(line)
+                except ValueError:
                     continue
-                kind = "text"
-            if kind == "text" and not text:
-                continue
-            if cur is None:                      # 잘린 앞부분의 답
-                cur = new_turn("", rec_time(rec))
-            if kind == "text":
-                cur["ai"].append(text)
-                if cur["parts"] and cur["parts"][-1][0] == "text":
-                    cur["parts"][-1] = ("text", cur["parts"][-1][1] + "\n\n" + text)
-                else:
-                    cur["parts"].append(("text", text))
-                last_tool = None
-                continue
-            name, inp = str(part.get("name") or ""), part.get("input")
-            what = tool_kind(name, inp if isinstance(inp, dict) else {})
-            last_tool = (what, part.get("id"))
-            if what[0] is None:
-                continue
-            if cur["parts"] and cur["parts"][-1][0] == "tools":
-                cur["parts"][-1][1].append(what)
-            else:
-                cur["parts"].append(("tools", [what]))
+                said = user_said(rec)
+                if said:
+                    cur = new_turn(said, rec_time(rec), [f"{at}:u{i}" for i in range(len(rec_images(rec)))])
+                    continue
+                if not isinstance(rec, dict) or rec.get("isSidechain"):
+                    continue
+                msg = rec.get("message")
+                content = (msg.get("content") if isinstance(msg, dict) else None) or []
+                if rec.get("type") == "user":
+                    n = 0
+                    for part in content if isinstance(content, list) else []:
+                        if isinstance(part, dict) and part.get("type") == "tool_result":
+                            results.add(part.get("tool_use_id"))
+                            k = len(images_in(part.get("content")))
+                            if cur is not None:  # 도구가 돌려준 그림 (예: 이미지 파일 읽기) → 그 자리에 작게
+                                cur["parts"] += [("image", f"{at}:r{i}") for i in range(n, n + k)]
+                            n += k
+                    continue
+                if rec.get("type") != "assistant" or not isinstance(content, list):
+                    continue
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    kind = part.get("type")
+                    if kind not in ("text", "tool_use", "thinking"):
+                        continue
+                    # 긴 작업 중 Claude 앱이 보여 주는 진행 안내 글은 '생각' 칸(thinking)에 글로 남는 일이 많다
+                    # (내용 없는 thinking 은 숨긴 생각이라 건너뜀)
+                    text = str(part.get("text" if kind == "text" else "thinking") or "").strip()
+                    if kind == "thinking":
+                        if not text:
+                            continue
+                        kind = "text"
+                    if kind == "text" and not text:
+                        continue
+                    if cur is None:              # 잘린 앞부분의 답
+                        cur = new_turn("", rec_time(rec))
+                    if kind == "text":
+                        cur["ai"].append(text)
+                        if cur["parts"] and cur["parts"][-1][0] == "text":
+                            cur["parts"][-1] = ("text", cur["parts"][-1][1] + "\n\n" + text)
+                        else:
+                            cur["parts"].append(("text", text))
+                        last_tool = None
+                        continue
+                    name, inp = str(part.get("name") or ""), part.get("input")
+                    what = tool_kind(name, inp if isinstance(inp, dict) else {})
+                    last_tool = (what, part.get("id"))
+                    if what[0] is None:
+                        continue
+                    if cur["parts"] and cur["parts"][-1][0] == "tools":
+                        cur["parts"][-1][1].append(what)
+                    else:
+                        cur["parts"].append(("tools", [what]))
+    except OSError:
+        pass
+    st["cur"], st["last_tool"] = cur, last_tool
+    if st["open_turn"] is not None:              # 지난번 '지금 하는 일'은 지우고 다시 정한다
+        st["open_turn"]["open"] = None
+        st["open_turn"] = None
     if cur is not None and last_tool and last_tool[0][0] and last_tool[1] not in results:
         cur["open"] = last_tool[0]               # 지금 하고 있는 일 (결과가 아직 안 옴)
-    return turns, more
+        st["open_turn"] = cur
+    return turns, st["start"] > 0
 
 
 _PLAN_CACHE = {}   # 기록 파일 → (읽은 위치, 계획 목록, 계획이 마지막으로 바뀐 시각)
@@ -1446,34 +1594,35 @@ _PLAN_CACHE = {}   # 기록 파일 → (읽은 위치, 계획 목록, 계획이 
 def claude_plan(transcript):
     """지금 계획 목록과 마지막으로 바뀐 시각: (계획 | None, 시각).
     계획은 한참 전에 만들어졌을 수 있어 기록 파일 전체에서 계획 도구만 골라 차례로 적용한다.
-    처음 한 번만 끝까지 읽고, 그다음부터는 새로 붙은 부분만 읽는다."""
+    처음 한 번만 끝까지 읽고, 그다음부터는 새로 붙은 부분만 읽는다.
+    한 줄씩 읽는다 — 수십 MB 기록을 한꺼번에 읽어 나누면 잠깐이지만 그 두세 배 메모리를 쓴다."""
     off, plan, changed = _PLAN_CACHE.get(transcript, (0, None, 0.0))
     try:
-        size = os.path.getsize(transcript)
-        if size < off:                           # 파일이 줄었으면 처음부터
+        if os.path.getsize(transcript) < off:    # 파일이 줄었으면 처음부터
             off, plan, changed = 0, None, 0.0
         with open(transcript, "rb") as f:
             f.seek(off)
-            data = f.read()
+            for line in f:
+                if not line.endswith(b"\n"):     # 아직 쓰는 중인 마지막 줄은 다음에
+                    break
+                off += len(line)
+                if b"update_plan" not in line and b"TodoWrite" not in line and b"wrap_up" not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("type") != "assistant" or rec.get("isSidechain"):
+                    continue
+                for part in (rec.get("message") or {}).get("content") or []:
+                    if isinstance(part, dict) and part.get("type") == "tool_use":
+                        inp = part.get("input")
+                        new = plan_step(plan, str(part.get("name") or ""), inp if isinstance(inp, dict) else {})
+                        if new is not None:
+                            plan, changed = new, rec_time(rec)
     except OSError:
-        return plan, changed
-    end = data.rfind(b"\n") + 1
-    for line in data[:end].splitlines():
-        if b"update_plan" not in line and b"TodoWrite" not in line and b"wrap_up" not in line:
-            continue
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(rec, dict) or rec.get("type") != "assistant" or rec.get("isSidechain"):
-            continue
-        for part in (rec.get("message") or {}).get("content") or []:
-            if isinstance(part, dict) and part.get("type") == "tool_use":
-                inp = part.get("input")
-                new = plan_step(plan, str(part.get("name") or ""), inp if isinstance(inp, dict) else {})
-                if new is not None:
-                    plan, changed = new, rec_time(rec)
-    _PLAN_CACHE[transcript] = (off + end, plan, changed)
+        pass
+    _PLAN_CACHE[transcript] = (off, plan, changed)
     return plan, changed
 
 
@@ -1531,10 +1680,19 @@ TOOL_WORDS = {
 }
 
 
+def tool_words(kind):
+    """(하는 중, 한 뒤) 글을 화면 언어로."""
+    if kind not in TOOL_WORDS:
+        kind = "tool"
+    if KO:
+        return TOOL_WORDS[kind][0]
+    return TOOL_TR.get(ui_lang(), {}).get(kind) or TOOL_WORDS[kind][1]
+
+
 def tool_doing(what):
     """지금 하는 일 한 줄: '읽는 중 taskpet.py'."""
     kind, target = what
-    word = TOOL_WORDS.get(kind, TOOL_WORDS["tool"])[0 if KO else 1][0]
+    word = tool_words(kind)[0]
     return f"{word} {target}".strip()
 
 
@@ -1545,7 +1703,7 @@ def tools_summary(tools):
         groups.setdefault(kind, []).append(target)
     out = []
     for kind, targets in groups.items():
-        word = TOOL_WORDS.get(kind, TOOL_WORDS["tool"])[0 if KO else 1][1]
+        word = tool_words(kind)[1]
         uniq = list(dict.fromkeys(x for x in targets if x))
         if kind in ("read", "edit", "write") and len(uniq) == 1:
             out.append(f"{word} {uniq[0]}")       # 파일 하나면 이름 (같은 파일을 여러 번이어도)
@@ -2302,7 +2460,7 @@ class Pet:
         self._refocus = None          # 카드를 다시 만들기 전 입력칸 커서 자리 (커서가 있었을 때만)
         self._input_extra = 0         # 입력칸이 한 줄보다 늘어난 높이 (그만큼 기록창을 줄임)
         self._thumb_cache = {}        # 대화 속 그림 작은 사진 (그림 이름 → 사진)
-        self._img_data = {}           # 지금 기록창에 있는 그림들 (이름 → base64)
+        self._img_src = None          # 지금 기록창 그림을 꺼낼 기록 파일 (그림은 자리만 들고 있음)
         self.reply_var.trace_add("write", lambda *a: self.save_draft())
         # 화면에 보이는 앱("claude"·"code"·"chatgpt")들, Claude 앱에 띄워 둔 세션 제목, ChatGPT 앱에 띄워 둔 대화 제목
         self.seen = ((), "", "")
@@ -2331,12 +2489,9 @@ class Pet:
         self.bubble.withdraw()
 
         self.tracker = Tracker(self.on_event)
-        self.tracker.add_recent_claude()          # 켜자마자 가장 최근 대화 1개
         self.updater = Updater()
         self.ext_tip = None               # 확장 설치 권유 줄을 둘지 (검사 결과, 다른 스레드가 채움)
         self.next_ext_check = time.time() + 30
-        global GPT
-        GPT = ChatGptWatcher()
 
         self.canvas.bind("<ButtonPress-1>", self.press)
         self.canvas.bind("<B1-Motion>", self.drag)
@@ -2351,8 +2506,20 @@ class Pet:
                 and l <= pos[0] <= r - self.cw and t_ <= pos[1] <= b - self.ch):
             x, y = pos
         self.root.geometry(f"{self.cw}x{self.ch}+{x}+{y}")
-        self.tick()
+        # 로봇부터 화면에 띄우고, 나머지 준비(최근 대화 읽기·감시 프로그램·소리 파일)는 그 뒤에
+        self.draw()
+        self.root.update()
+        self.root.after(10, self.late_init)
         self.root.mainloop()
+
+    def late_init(self):
+        self.tracker.add_recent_claude()          # 켜자마자 가장 최근 대화 1개
+        global GPT
+        GPT = ChatGptWatcher()
+        make_sounds(missing_only=True)
+        if FROZEN:
+            threading.Thread(target=remove_old_extracts, daemon=True).start()
+        self.tick()
 
     # ---- 신호 ----
     def on_event(self, kind, key):
@@ -2496,7 +2663,34 @@ class Pet:
             sm.add_command(label=("✓ " if on else "   ") + label,
                            command=lambda k=key, v=not on: self.set_setting(k, v))
         sm.add_command(label=("✓ " if MUTED else "   ") + t("mute"), command=self.toggle_mute)
+        # 언어: 어느 언어 화면에서도 찾을 수 있게 이름에 늘 'Language' 를 붙이고, 각 언어는 그 언어 글자로
+        lm = tk.Menu(sm, tearoff=0, bg=INNER, fg=FG,
+                     activebackground=ACCENT, activeforeground="#1b1c20")
+        cur = self.settings.get("lang") or ""
+        for code, name in [("", t("lang_auto"))] + LANG_NAMES:
+            lm.add_command(label=("● " if cur == code else "○ ") + name,
+                           command=lambda c=code: self.set_lang(c))
+            if not code:
+                lm.add_separator()
+        sm.add_separator()
+        sm.add_cascade(label=t("lang_menu"), menu=lm)
         return sm
+
+    def set_lang(self, code):
+        """언어를 바꾸면 글자·글꼴이 여러 곳에 박혀 있으니 로봇을 새로 띄운다."""
+        if code == (self.settings.get("lang") or ""):
+            return
+        self.save_setting("lang", code)
+        args = [sys.executable, "--restart"] if FROZEN else [sys.executable, os.path.abspath(__file__), "--restart"]
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+        # 작업 묶음(job)에서 빠져나와 따로 돌게 (안 되면 그냥 따로)
+        for flags in (0x01000000 | 0x00000008 | 0x00000200, 0x00000008 | 0x00000200):
+            try:
+                subprocess.Popen(args, cwd=APP_DIR, env=env, creationflags=flags)
+                break
+            except OSError:
+                continue
+        self.root.destroy()
 
     def ask_autohide(self):
         """말풍선 자동 숨김 시간을 직접 정한다 (초, 3초~1시간)."""
@@ -2638,6 +2832,8 @@ class Pet:
             self.check_ext_tip()
             if self.tick_n % 10 == 1:
                 self.tracker.refresh_claude_titles()
+            if self.tick_n % 150 == 1 and GPT:   # 1분마다: 감시 프로그램이 너무 커졌으면 새로
+                GPT.check_memory()
             self.update_bubble()
         self.draw()
         self.root.after(400, self.tick)
@@ -2759,8 +2955,46 @@ class Pet:
             img = full
         photo = ImageTk.PhotoImage(img)
         if keep:
-            self._rounds[key] = photo
+            self.keep_round(key, photo)
         return photo
+
+    def keep_round(self, key, value):
+        """둥근 그림 모아 두기 (오래된 것부터 버림 — 쓰고 있는 칸은 그림을 직접 들고 있어서 안 사라짐)."""
+        if len(self._rounds) >= 300:
+            self._rounds.pop(next(iter(self._rounds)))
+        self._rounds[key] = value
+
+    def round_bg(self, cv, w, h, fill, outline=None, ow=0, r=None, under=INNER):
+        """캔버스 cv 에 둥근 바탕을 깐다 (그림은 cv.imgs 가 들고 있음).
+        긴 칸은 위·아래 둥근 부분만 그림으로 (같은 폭이면 다시 씀) 하고 가운데 곧은 부분은 캔버스 사각형으로 —
+        칸 높이만 한 그림을 만들면 긴 답변 칸 하나가 1~2MB 라, 이전 대화를 많이 불러오면 수백 MB 가 된다."""
+        r = r if r is not None else h // 2
+        cap = r + 2                              # 위·아래 둥근 부분 높이
+        if h <= cap * 2 + 2:                     # 짧은 칸은 그림 하나
+            cv.imgs = [self.round_photo(w, h, fill, outline, ow, r, under, keep=False)]
+            cv.create_image(0, 0, image=cv.imgs[0], anchor="nw")
+            return
+        key = ("caps", w, fill, outline, ow, r, under)
+        if key not in self._rounds:
+            k, hh = 4, cap * 2 + 2
+            img = Image.new("RGB", (w * k, hh * k), under)
+            ImageDraw.Draw(img).rounded_rectangle(
+                [0, 0, w * k - 1, hh * k - 1], radius=r * k, fill=fill, outline=outline, width=ow * k)
+            img = img.resize((w, hh), Image.LANCZOS)
+            row = [img.getpixel((x, cap)) for x in range(w)]
+            runs, x0 = [], 0                     # 가운데 곧은 줄 = 같은 색 구간들 (테두리·바탕)
+            for x in range(1, w + 1):
+                if x == w or row[x] != row[x0]:
+                    runs.append((x0, x, "#%02x%02x%02x" % row[x0]))
+                    x0 = x
+            self.keep_round(key, (ImageTk.PhotoImage(img.crop((0, 0, w, cap))),
+                                  ImageTk.PhotoImage(img.crop((0, hh - cap, w, hh))), runs))
+        top, bottom, runs = self._rounds[key]
+        cv.imgs = [top, bottom]
+        cv.create_image(0, 0, image=top, anchor="nw")
+        cv.create_image(0, h - cap, image=bottom, anchor="nw")
+        for x0, x1, color in runs:
+            cv.create_rectangle(x0, cap, x1, h - cap, fill=color, width=0)
 
     def round_label(self, parent, text, fill, fg, size=8, padx=7, pady=3, width=None, hover=None, under=INNER):
         """알약 모양 글자 칸. hover=(바탕, 글자) 면 마우스를 올렸을 때 그 색으로. under = 둘레 바탕색."""
@@ -2772,15 +3006,18 @@ class Pet:
         lb = tk.Label(parent, text=text, image=img, compound="center", bg=under, fg=fg, font=font,
                       bd=0, padx=0, pady=0, highlightthickness=0)
         lb.pill = True                           # 줄에 마우스를 올려도 바탕 그대로
+        lb.imgs = [img]                          # 모아 둔 그림이 버려져도 이 칸에선 안 사라지게
         if hover:
             on = self.round_photo(w, h, hover[0], under=under)
+            lb.imgs.append(on)
             lb.bind("<Enter>", lambda ev: lb.configure(image=on, fg=hover[1]), add="+")
             lb.bind("<Leave>", lambda ev: lb.configure(image=img, fg=fg), add="+")
             lb.configure(cursor="hand2")
         return lb
 
     def pill_label(self, parent, e):
-        label = SRC_LABEL.get(e.get("src"), "Claude")
+        src = e.get("src")
+        label = t("src_" + src) if src in ("claudeweb", "claudechat", "chatweb") else SRC_LABEL.get(src, "Claude")
         if e.get("entry") == "claude-vscode":
             label += " · VS Code"
         if e.get("browser"):                     # 웹 줄은 어느 브라우저인지도
@@ -2837,14 +3074,42 @@ class Pet:
             self.build_detail(self.detail, self.tracker.tasks[self.detail], now)
         else:
             self.build_list(items, now)
+        # 목록과 펼친 카드의 폭을 같게 → 펼치고 접을 때 위아래로만 바뀌고 가로로 움찔하지 않음
+        tk.Frame(self.bub_box, bg=INNER, width=self.content_w(), height=1).pack()
         self.position_bubble()                   # (크기 계산은 이 안에서 한 번)
         self.bub_c.itemconfigure("boxwin", window=self.bub_box)
         self.bub_c.tag_raise("boxwin")
         old.destroy()
         self.show_bubble()
 
+    def content_w(self):
+        """말풍선 안쪽 폭 — 목록·펼친 카드 모두 이 폭 (사용자: 펼칠 때 가로로 움찔하지 않게).
+        보통 목록 줄(약 350px)이 시간 글자 여유까지 두고 들어가는 폭."""
+        return S(368)
+
+    def fit_titles(self, rows):
+        """줄이 말풍선 폭을 넘으면 제목을 실제 글자 폭에 맞춰 '…'로 줄인다 (글자 수가 아니라 폭으로)."""
+        self.bub_box.update_idletasks()
+        f = tkfont.Font(root=self.root, font=(FONT, 9, "bold"))
+        # (시간 글자가 '9분'→'10분'처럼 늘어나도 넘지 않게 조금 여유)
+        room_all = self.content_w() - S(4) - S(16)
+        for row, head, name in rows:
+            excess = row.winfo_reqwidth() - room_all
+            if excess <= 0:
+                continue
+            room = f.measure(" " + name) - excess
+            lo, hi = 0, len(name)
+            while lo < hi:                       # 들어가는 가장 긴 앞부분
+                mid = (lo + hi + 1) // 2
+                if f.measure(" " + name[:mid] + "…") <= room:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            head.configure(text=" " + name[:lo].rstrip() + "…")
+
     # ---- 목록: 줄마다 한 줄 (아이콘 · 제목 · 이름표 · 짧은 상태 · › · ✕) ----
     def build_list(self, items, now):
+        rows = []
         for i, (key, e) in enumerate(items[:8]):
             status = e.get("status")
             if i:                                # 줄 사이 얇은 구분선
@@ -2864,6 +3129,7 @@ class Pet:
             head.hl = True                       # 마우스를 올리면 이 글자 색이 바뀜
             head.base = DONE_FG if status == "done" else FG
             head.pack(side="left")
+            rows.append((row, head, name.rstrip("…")))
             self.pill_label(row, e).pack(side="left", padx=(S(6), 0))
             if self.drafts.get(key):             # 로봇에서 쓰다 만 글이 있으면 ✎
                 tk.Label(row, text="✎", bg=INNER, fg=WORKING, font=(FONT, 9, "bold")).pack(
@@ -2895,6 +3161,7 @@ class Pet:
         if len(items) > 8:
             tk.Label(self.bub_box, text=t("more", n=len(items) - 8), bg=INNER,
                      fg=SUB, font=(FONT, 8)).pack(anchor="w", padx=S(2))
+        self.fit_titles(rows)
 
     # ---- 상세 카드: › 를 누른 줄 하나만 (답변 · 질문 · 보내기) ----
     def build_detail(self, key, e, now):
@@ -2914,7 +3181,7 @@ class Pet:
         title = tk.Label(card, text=" " + (e.get("title") or e.get("prompt") or "?"),
                          image=self.icon(e.get("src")), compound="left", bg=INNER,
                          fg=DONE_FG if status == "done" else FG,
-                         font=(FONT, 10, "bold"), wraplength=S(300), justify="left", anchor="w",
+                         font=(FONT, 10, "bold"), wraplength=self.content_w() - S(40), justify="left", anchor="w",
                          cursor="hand2")
         title.pack(fill="x", pady=(S(6), 0))
         title.bind("<Double-Button-1>", lambda ev: self.title_open(key, e))
@@ -2928,7 +3195,7 @@ class Pet:
         card_only = e.get("card") and not e.get("choices")    # 여러 문항 카드는 앱에서 답하게
         if status == "waiting" and e.get("ask"):
             tk.Label(card, text=e["ask"], bg=INNER, fg=FG, font=(FONT, 9, "bold"), anchor="w",
-                     justify="left", wraplength=S(300)).pack(fill="x", pady=(S(8), S(2)))
+                     justify="left", wraplength=self.content_w() - S(40)).pack(fill="x", pady=(S(8), S(2)))
             if card_only:
                 tk.Label(card, text=t("answer_in_app"), bg=INNER, fg=SUB, font=(FONT, 8),
                          anchor="w").pack(fill="x")
@@ -2973,7 +3240,8 @@ class Pet:
             mtime = 0
         if not force and "turns" in h and mtime == h.get("mtime"):
             return False
-        h["turns"], h["more"] = claude_turns(e["transcript"], h["bytes"])
+        # 읽던 자리(state)를 넘겨서 일하는 동안엔 새로 붙은 줄만 읽는다
+        h["turns"], h["more"] = claude_turns(e["transcript"], h["bytes"], h.setdefault("state", {}))
         h["plan"], h["plan_at"] = claude_plan(e["transcript"])
         h["mtime"] = mtime
         return True
@@ -2988,19 +3256,14 @@ class Pet:
         if len(turns) > len(shown) or h.get("more"):
             out.append(("older", ""))
         show_ai = self.settings.get("answer_preview", True)
-        self._img_data = {}
-
-        def img(kind, b64):                      # 그림은 칸 비교용 짧은 이름으로, 내용은 따로 둔다
-            sig = f"{len(b64)}:{b64[:24]}{b64[-24:]}"
-            self._img_data[sig] = b64
-            return kind, sig
+        self._img_src = e.get("transcript")      # 그림은 자리만 있고, 그릴 때 이 파일에서 꺼낸다
         for turn in shown:
             me, imgs = turn["me"], turn.get("imgs") or []
             if imgs:                             # 그림은 아래에 작게 보이므로 '(이미지)' 글자는 뺀다
-                me = "\n".join(x for x in me.split("\n") if x != "(이미지)")
+                me = "\n".join(x for x in me.split("\n") if x != t("img_tag"))
             if me:
                 out.append(("me", me))
-            out += [img("myimg", b) for b in imgs[:4]]
+            out += [("myimg", ref) for ref in imgs[:4]]
             parts = turn.get("parts") or []
             if not show_ai:
                 parts = [p for p in parts if p[0] != "text"]
@@ -3014,7 +3277,7 @@ class Pet:
                         val = "…" + val[-self.CHAT_TEXT_MAX:]
                     out.append(("ai", val))
                 elif kind == "image":
-                    out.append(img("image", val))
+                    out.append(("image", val))
                 else:
                     out.append(("tools", tools_summary(val)))
         # 계획은 Claude 앱처럼 최근 메시지 아래에 하나: 아직 남은 단계가 있거나, 이번 대화에서 고친 것
@@ -3094,7 +3357,7 @@ class Pet:
         ch["t0"] = turns[-1].get("t0", 0) if turns else 0
         self.tick_status()
         inner.update_idletasks()
-        W = max(inner.winfo_reqwidth(), S(330))
+        W = max(inner.winfo_reqwidth(), self.content_w() - S(4))   # 말풍선 폭에 맞춤
         H = max(inner.winfo_reqheight(), 1)
         view = min(H, self.chat_view_max())
         cv.itemconfigure("inner", width=W)        # 폭을 채워야 내 메시지가 오른쪽 끝에 붙음
@@ -3121,12 +3384,13 @@ class Pet:
             pass
 
     def image_block(self, parent, sig, right=False):
-        """대화 속 그림을 작게 (둥근 모서리, 내가 붙인 것은 오른쪽). 누르면 크게 열기."""
-        cache = self._thumb_cache
-        ph = cache.get(sig)
+        """대화 속 그림을 작게 (둥근 모서리, 내가 붙인 것은 오른쪽). 누르면 크게 열기.
+        sig = 기록 파일 안 그림 자리 — 그림 글자는 여기서 그 한 줄만 다시 읽어 꺼낸다."""
+        src, cache = self._img_src, self._thumb_cache
+        ph = cache.get((src, sig))
         if ph is None:
             try:
-                im = Image.open(io.BytesIO(base64.b64decode(self._img_data[sig])))
+                im = Image.open(io.BytesIO(base64.b64decode(claude_image(src, sig))))
                 im = im.convert("RGB")
             except Exception:
                 w = tk.Label(parent, text=t("img_broken"), bg=INNER, fg=SUB, font=(FONT, 8))
@@ -3140,19 +3404,19 @@ class Pet:
             out = Image.new("RGB", (w, h), INNER)
             out.paste(im, mask=mask.resize((w, h), Image.LANCZOS))
             ph = ImageTk.PhotoImage(out)
-            if len(cache) > 60:                  # 오래된 것부터 버림
+            if len(cache) >= 24:                 # 오래된 것부터 버림 (작은 사진 하나 약 0.1MB, 칸이 들고 있는 건 그대로)
                 cache.pop(next(iter(cache)))
-            cache[sig] = ph
+            cache[(src, sig)] = ph
         lb = tk.Label(parent, image=ph, bg=INNER, bd=0, cursor="hand2")
         lb.img = ph
         lb.pack(anchor="e" if right else "w", padx=(0, 0) if right else (S(6), 0), pady=(S(6), 0))
-        lb.bind("<Button-1>", lambda ev: self.open_image(sig))
+        lb.bind("<Button-1>", lambda ev: self.open_image(src, sig))
         return lb
 
-    def open_image(self, sig):
+    def open_image(self, src, sig):
         """그림을 임시 파일로 저장해 사진 앱으로 크게 연다."""
         try:
-            raw = base64.b64decode(self._img_data[sig])
+            raw = base64.b64decode(claude_image(src, sig))
             ext = (".png" if raw[:4] == b"\x89PNG" else ".jpg" if raw[:2] == b"\xff\xd8" else
                    ".webp" if raw[8:12] == b"WEBP" else ".gif" if raw[:4] == b"GIF8" else ".png")
             folder = os.path.join(tempfile.gettempdir(), "TaskPet-images")
@@ -3183,8 +3447,7 @@ class Pet:
         pad = S(10)
         w, h = max(box.winfo_reqwidth() + pad * 2, S(300)), box.winfo_reqheight() + pad * 2
         cv.configure(width=w, height=h)
-        cv.img = self.round_photo(w, h, ANS_BG, outline=ENTRY_LINE, ow=S(1), r=S(14), keep=False)
-        cv.create_image(0, 0, image=cv.img, anchor="nw")
+        self.round_bg(cv, w, h, ANS_BG, outline=ENTRY_LINE, ow=S(1), r=S(14))
         cv.create_window(pad, pad, window=box, anchor="nw")
         cv.pack(anchor="w", pady=(S(8), 0))
         return cv
@@ -3252,8 +3515,7 @@ class Pet:
         w, h = lb.winfo_reqwidth() + padx * 2, lb.winfo_reqheight() + pady * 2
         cv.configure(width=w, height=h)
         # 크기가 제각각이라 그림을 모아 두지 않고 이 칸이 들고 있다 (칸이 지워지면 같이 사라짐)
-        cv.img = self.round_photo(w, h, MY_BG, r=min(S(16), h // 2), keep=False)
-        cv.create_image(0, 0, image=cv.img, anchor="nw")
+        self.round_bg(cv, w, h, MY_BG, r=min(S(16), h // 2))
         cv.create_window(padx, pady, window=lb, anchor="nw")
         cv.pack(anchor="e", pady=(S(8), 0))
         return cv
@@ -3269,8 +3531,7 @@ class Pet:
         pad = S(9)
         w, h = tw.winfo_reqwidth() + pad * 2, th + pad * 2
         cv.configure(width=w, height=h)
-        cv.img = self.round_photo(w, h, ANS_BG, r=S(16), keep=False)
-        cv.create_image(0, 0, image=cv.img, anchor="nw")
+        self.round_bg(cv, w, h, ANS_BG, r=S(16))
         cv.create_window(pad, pad, window=tw, anchor="nw", height=th)
         cv.pack(anchor="w", pady=(S(8), 0))
         # 글 칸이 휠을 먹으면 기록창이 안 굴러가므로 기록창으로 넘긴다
@@ -3325,7 +3586,7 @@ class Pet:
 
     def big_button(self, parent, text, command):
         """선택지: 폭 가득한 큰 알약 버튼 (Claude 앱 질문 카드처럼 세로로)."""
-        b = self.round_label(parent, text, CHIP_BG, CHIP_FG, size=9, pady=6, width=S(330),
+        b = self.round_label(parent, text, CHIP_BG, CHIP_FG, size=9, pady=6, width=self.content_w() - S(4),
                              hover=(CHIP_HOVER, CHIP_FG))
         b.pack(anchor="w", pady=(S(4), 0))
         b.bind("<Button-1>", lambda ev: command())
@@ -3335,7 +3596,7 @@ class Pet:
         # Claude·ChatGPT 앱의 입력창처럼: 폭 가득한 둥근 상자 안에 여러 줄 글 칸(길어지면 6줄까지 늘어나고
         # 그 뒤로는 칸 안에서 스크롤), 상자 아래쪽 안에 '이미지'(왼쪽)·'➤'(오른쪽) 버튼.
         # Enter = 보내기, Shift+Enter = 줄바꿈, 글씨는 Claude 글과 같은 글씨체·크기, 비어 있으면 흐린 안내 글.
-        ew = S(330)
+        ew = self.content_w() - S(4)             # 말풍선 폭 가득
         padx, pady, gap, bot = S(12), S(9), S(4), S(6)
         tw_px = ew - padx * 2
         cv = tk.Canvas(box, width=ew, bg=INNER, highlightthickness=0, bd=0)
@@ -3343,9 +3604,10 @@ class Pet:
         ent = tk.Text(cv, bg=ENTRY_BG, fg=ENTRY_FG, insertbackground=ENTRY_FG, relief="flat", bd=0,
                       font=REPLY_FONT, wrap="word", width=1, height=1, padx=0, pady=0,
                       spacing2=S(2), highlightthickness=0,
-                      # 고칠 글을 고를 때는 파랑 대신 옅은 주황, 다른 데를 누르면 선택 표시는 안 보이게
-                      selectbackground=SELECT_BG, selectforeground=ENTRY_FG, inactiveselectbackground=ENTRY_BG)
+                      # Tk 가 그리는 선택 표시는 보이지 않게 (아래 'mysel' 이 대신 칠함)
+                      selectbackground=ENTRY_BG, selectforeground=ENTRY_FG, inactiveselectbackground=ENTRY_BG)
         ent.tag_configure("ime", underline=True)   # 조합 중인 한글 (InlineIME)
+        ent.tag_configure("mysel", background=SELECT_BG)   # 고른 글 (줄바꿈 빼고 글자에만, 옅은 주황)
         ent.is_reply = True                      # entry_focused()·InlineIME 가 알아보게
         ent.insert("1.0", self.reply_var.get())
         ent.edit_modified(False)
@@ -3387,14 +3649,26 @@ class Pet:
             else:                                # 커서(맨 왼쪽)를 덮지 않게 조금 오른쪽에
                 hint.place(x=S(8), y=0)
 
-        def trim_sel(ev=None):
-            # 글 끝을 넘어 끌면 마지막 줄바꿈까지 골라져 줄 오른쪽 끝까지 색이 칠해지므로 그 부분은 뺀다
+        def paint_sel(ev=None, show=True):
+            # Tk 는 고른 줄바꿈을 줄 오른쪽 끝까지 칠해서, 끌 때마다 빈 여백이 칠해졌다 사라졌다.
+            # 진짜 선택(sel)은 그대로 두고(복사는 줄바꿈까지 정상) 보이지 않게 한 뒤,
+            # 줄마다 글자 부분에만 'mysel' 을 칠한다 → 여백은 처음부터 칠해질 일이 없음
             try:
-                if ent.tag_ranges("sel") and ent.compare("sel.last", ">", "end-1c"):
-                    ent.tag_remove("sel", "end-1c", "end")
+                ent.tag_remove("mysel", "1.0", "end")
+                r = ent.tag_ranges("sel") if show else ()
+                for a, b in zip(r[::2], r[1::2]):
+                    first, last = int(str(a).split(".")[0]), int(str(b).split(".")[0])
+                    for n in range(first, last + 1):
+                        s = str(a) if n == first else f"{n}.0"
+                        e = ent.index(f"{n}.0 lineend")
+                        if n == last and ent.compare(b, "<", e):
+                            e = str(b)
+                        if ent.compare(s, "<", e):
+                            ent.tag_add("mysel", s, e)
+                ent.tag_raise("mysel")
             except tk.TclError:
                 pass
-        ent.bind("<<Selection>>", trim_sel, add="+")
+        ent.bind("<<Selection>>", paint_sel, add="+")
         fit(self.input_px(self.reply_var.get(), tw_px))
         show_hint()
 
@@ -3429,13 +3703,19 @@ class Pet:
 
         def on_focus(ev):
             ime_font(ent)
+            paint_sel()                          # 다시 오면 고른 글 표시도 다시
             if ime:
                 ime.attach(ent)
+
+        def on_blur(ev):
+            paint_sel(show=False)                # 다른 데로 가면 고른 글 표시는 숨김
+            if ime:
+                ime.detach(ent)
         ent.bind("<<Modified>>", changed)
         ent.bind("<Return>", on_return)
         ent.bind("<KP_Enter>", on_return)
         ent.bind("<FocusIn>", on_focus, add="+")
-        ent.bind("<FocusOut>", lambda ev: ime and ime.detach(ent), add="+")
+        ent.bind("<FocusOut>", on_blur, add="+")
         ent.bind("<Escape>", lambda ev: self.close_detail())
         ent.bind("<Key>", on_key, add="+")
         # 다른 곳을 눌렀다가 다시 입력칸을 누르면 키보드를 받게 (커서는 누른 자리에)
@@ -3620,6 +3900,8 @@ class Pet:
     def close_detail(self):
         self.detail = None
         self._draft_key = None                   # 닫힌 뒤 입력칸 글이 바뀌어도 저장된 글은 그대로
+        self._hist.clear()                       # 읽어 둔 대화 목록도 버린다 (다시 펼치면 최근 것부터 새로 읽음)
+        self._img_src = None
         self.update_bubble(force=True)
 
     def send_reply(self, key, text, other=False):
@@ -3754,8 +4036,15 @@ def main():
     if FROZEN and os.path.normcase(APP_DIR) != os.path.normcase(INSTALL_DIR):
         install()
         return
-    ctypes.windll.kernel32.CreateMutexW(None, False, "TaskPetWidget")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # 이미 실행 중
+    # 이미 실행 중이면 끝 (언어를 바꿔 다시 켤 때는 옛 로봇이 꺼질 때까지 5초까지 기다린다)
+    for _ in range(50 if "--restart" in sys.argv else 1):
+        h = ctypes.windll.kernel32.CreateMutexW(None, False, "TaskPetWidget")
+        if ctypes.windll.kernel32.GetLastError() != 183:
+            break
+        ctypes.windll.kernel32.CloseHandle(h)
+        if "--restart" in sys.argv:
+            time.sleep(0.1)
+    else:
         return
     # 창 없는 exe는 오류를 보여 줄 곳이 없어서, 오류가 나면 error.log에 남긴다
     if sys.stderr is None:
@@ -3767,7 +4056,6 @@ def main():
             sys.stderr.write(f"\n--- 시작 {time.strftime('%Y-%m-%d %H:%M:%S')} v{VERSION}\n")
         except OSError:
             pass
-    make_sounds()
     Pet()
 
 

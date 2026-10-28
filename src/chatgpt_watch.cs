@@ -13,6 +13,9 @@
 //   Claude 창은 앞으로 가져오지 않는다. 다른 창 뒤에 가려져 있으면 그대로 두고 클릭 신호만 창에 보낸다.
 //   최소화돼 있으면 앱이 완전히 쉬어서, 처리하는 동안만 눈에 안 보이게(투명·클릭 통과) 되살렸다가 다시 최소화한다.
 //   쓰던 창의 포커스와 마우스는 건드리지 않는다. 단계 기록은 이 프로그램 옆 card.log 에 남긴다.
+//
+//   화면 읽기는 Windows 의 COM 화면 읽기(IUIAutomation)를 직접 쓴다. .NET 의 System.Windows.Automation 은
+//   읽을 때마다 윈도우 쪽 메모리가 조금씩 새서(2초마다 읽으면 1분에 약 1.2MB, GC 를 해도 그대로) 하루면 1~2GB 가 됐다.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -20,7 +23,71 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-using System.Windows.Automation;
+using UIA = Interop.UIAutomationClient;
+
+// 화면 읽기 요소 하나 (COM IUIAutomationElement 를 감싼 것)
+class El
+{
+    public static readonly UIA.IUIAutomation A = new UIA.CUIAutomation8();
+    public const UIA.TreeScope Children = UIA.TreeScope.TreeScope_Children;
+    public const UIA.TreeScope Descendants = UIA.TreeScope.TreeScope_Descendants;
+    public const int Button = 50000, Edit = 50004, Image = 50006, RadioButton = 50013, StatusBar = 50017, Document = 50030;
+    public const int InvokeId = 10000, ValueId = 10002, SelectionItemId = 10010, ToggleId = 10015, ScrollItemId = 10017;
+    const int TypeP = 30003, NameP = 30005, ClassP = 30012;
+
+    // 목록을 훑을 땐 이름·클래스·종류를 한 번에 받아 온다 (요소마다 앱에 따로 묻지 않게)
+    static readonly UIA.IUIAutomationCacheRequest Cache = MakeCache();
+    static UIA.IUIAutomationCacheRequest MakeCache()
+    {
+        var c = A.CreateCacheRequest();
+        c.AddProperty(TypeP);
+        c.AddProperty(NameP);
+        c.AddProperty(ClassP);
+        return c;
+    }
+
+    public readonly UIA.IUIAutomationElement E;
+    readonly bool cached;
+    El(UIA.IUIAutomationElement e, bool cached) { E = e; this.cached = cached; }
+    static El Of(UIA.IUIAutomationElement e, bool cached) { return e == null ? null : new El(e, cached); }
+
+    public static El Root { get { return Of(A.GetRootElement(), false); } }
+    public static UIA.IUIAutomationCondition True { get { return A.CreateTrueCondition(); } }
+    public static UIA.IUIAutomationCondition TypeIs(int type) { return A.CreatePropertyCondition(TypeP, type); }
+    public static UIA.IUIAutomationCondition NameAndType(string name, int type)
+    {
+        return A.CreateAndCondition(A.CreatePropertyCondition(NameP, name), TypeIs(type));
+    }
+
+    // 이름·클래스·종류는 목록으로 받은 요소면 받아 둔 값, 아니면 지금 값. 나머지는 늘 지금 값
+    public string Name { get { return (cached ? E.CachedName : E.CurrentName) ?? ""; } }
+    public string ClassName { get { return (cached ? E.CachedClassName : E.CurrentClassName) ?? ""; } }
+    public int Type { get { return cached ? E.CachedControlType : E.CurrentControlType; } }
+    public int ProcessId { get { return E.CurrentProcessId; } }
+    public IntPtr Hwnd { get { return E.CurrentNativeWindowHandle; } }
+    public bool Enabled { get { return E.CurrentIsEnabled != 0; } }
+    public UIA.tagRECT Rect { get { return E.CurrentBoundingRectangle; } }
+
+    public List<El> FindAll(UIA.TreeScope scope, UIA.IUIAutomationCondition cond)
+    {
+        var arr = E.FindAllBuildCache(scope, cond, Cache);
+        var list = new List<El>();
+        if (arr != null)
+            for (int i = 0; i < arr.Length; i++) list.Add(new El(arr.GetElement(i), true));
+        return list;
+    }
+
+    public El FindFirst(UIA.TreeScope scope, UIA.IUIAutomationCondition cond)
+    {
+        return Of(E.FindFirstBuildCache(scope, cond, Cache), true);
+    }
+
+    public El Parent() { return Of(A.ControlViewWalker.GetParentElementBuildCache(E, Cache), true); }
+    public El PrevSibling() { return Of(A.ControlViewWalker.GetPreviousSiblingElementBuildCache(E, Cache), true); }
+
+    // 그 기능(누르기·값·토글 …)이 없으면 null
+    public T Pattern<T>(int id) where T : class { return E.GetCurrentPattern(id) as T; }
+}
 
 class ChatGptWatch
 {
@@ -47,16 +114,16 @@ class ChatGptWatch
 
     // 화면 읽기의 '누르기'(Invoke·Toggle)와 글 넣기(SetValue)는 Claude 앱이 창을 맨 앞으로 끌어와 포커스까지 가져가므로,
     // 그 자리에 클릭 신호만 창에 직접 보낸다. 실제 마우스 포인터는 움직이지 않고 포커스도 바꾸지 않는다.
-    static bool ClickOn(AutomationElement e, IntPtr hwnd)
+    static bool ClickOn(El e, IntPtr hwnd)
     {
         try
         {
-            object si;
-            if (e.TryGetCurrentPattern(ScrollItemPattern.Pattern, out si)) ((ScrollItemPattern)si).ScrollIntoView();
+            var si = e.Pattern<UIA.IUIAutomationScrollItemPattern>(El.ScrollItemId);
+            if (si != null) si.ScrollIntoView();
             Thread.Sleep(150);
-            var r = e.Current.BoundingRectangle;
-            if (r.IsEmpty || r.Width < 2) return false;
-            var pt = new POINT { X = (int)(r.X + Math.Min(40, r.Width / 2)), Y = (int)(r.Y + r.Height / 2) };
+            var r = e.Rect;
+            if (r.right - r.left < 2) return false;
+            var pt = new POINT { X = r.left + Math.Min(40, (r.right - r.left) / 2), Y = r.top + (r.bottom - r.top) / 2 };
             ScreenToClient(hwnd, ref pt);
             var lp = new IntPtr((pt.Y << 16) | (pt.X & 0xFFFF));
             PostMessage(hwnd, 0x0200, IntPtr.Zero, lp);       // WM_MOUSEMOVE
@@ -137,46 +204,43 @@ class ChatGptWatch
         return b.Append('"').ToString();
     }
 
-    static List<AutomationElement> AppWindows(string process)
+    static List<El> AppWindows(string process)
     {
         var pids = new HashSet<int>(Process.GetProcessesByName(process).Select(p => p.Id));
-        var list = new List<AutomationElement>();
+        var list = new List<El>();
         if (pids.Count == 0) return list;
-        foreach (AutomationElement w in AutomationElement.RootElement.FindAll(
-                     TreeScope.Children, Condition.TrueCondition))
+        foreach (var w in El.Root.FindAll(El.Children, El.True))
         {
-            try { if (pids.Contains(w.Current.ProcessId)) list.Add(w); } catch { }
+            try { if (pids.Contains(w.ProcessId)) list.Add(w); } catch { }
         }
         return list;
     }
 
     // ChatGPT 사이드바 대화 줄 = ClassName에 sidebar-item 이 들어간 버튼
-    static bool IsGptRow(AutomationElement e)
+    static bool IsGptRow(El e)
     {
-        return e.Current.ControlType == ControlType.Button
-            && (e.Current.ClassName ?? "").Contains("sidebar-item");
+        return e.Type == El.Button && e.ClassName.Contains("sidebar-item");
     }
 
     // Claude 사이드바 대화 줄 = 이름 있는 text-start 버튼 ('…에 대한 더 많은 옵션' 버튼은 제외)
-    static bool IsClaudeRow(AutomationElement e)
+    static bool IsClaudeRow(El e)
     {
-        if (e.Current.ControlType != ControlType.Button) return false;
-        string n = e.Current.Name ?? "";
+        if (e.Type != El.Button) return false;
+        string n = e.Name;
         return n.Trim().Length > 0 && !n.EndsWith("옵션") && !n.EndsWith("options")
-            && (e.Current.ClassName ?? "").Contains("text-start");
+            && e.ClassName.Contains("text-start");
     }
 
     // 상태 표시가 줄 안에 있으면 위로, 줄 바로 옆에 있으면 앞 형제에서 찾는다
-    static AutomationElement RowOf(AutomationElement e, Func<AutomationElement, bool> isRow)
+    static El RowOf(El e, Func<El, bool> isRow)
     {
-        var walker = TreeWalker.ControlViewWalker;
         for (int i = 0; i < 6 && e != null; i++)
         {
             try
             {
-                var prev = walker.GetPreviousSibling(e);
+                var prev = e.PrevSibling();
                 if (prev != null && isRow(prev)) return prev;
-                e = walker.GetParent(e);
+                e = e.Parent();
                 if (e != null && isRow(e)) return e;
             }
             catch { return null; }
@@ -184,19 +248,18 @@ class ChatGptWatch
         return null;
     }
 
-    static List<string> WorkingTitles(AutomationElement w, Func<AutomationElement, bool> isRow)
+    static List<string> WorkingTitles(El w, Func<El, bool> isRow)
     {
         var titles = new List<string>();
-        var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.StatusBar);
-        foreach (AutomationElement s in w.FindAll(TreeScope.Descendants, cond))
+        foreach (var s in w.FindAll(El.Descendants, El.TypeIs(El.StatusBar)))
         {
             try
             {
-                string status = (s.Current.Name ?? "").Trim();
+                string status = s.Name.Trim();
                 if (status.Length == 0) continue;   // '작업 중'·'실행 중' 같은 이름이 있는 표시만
                 var row = RowOf(s, isRow);
                 if (row == null) continue;
-                string t = (row.Current.Name ?? "").Trim();
+                string t = row.Name.Trim();
                 // Claude 앱은 줄 이름 끝에 상태 글자까지 붙여 준다 ("제목 실행 중") → 떼어 낸다
                 if (t.EndsWith(status) && t.Length > status.Length)
                     t = t.Substring(0, t.Length - status.Length).Trim();
@@ -209,16 +272,15 @@ class ChatGptWatch
 
     // Claude 창이 채팅 화면인지 (Code 탭이면 채팅 목록이 안 보이므로 '끝남'으로 착각하지 않게 판단을 미룬다),
     // 그리고 지금 보이는 대화가 답하는 중인지 ('응답 중지' 버튼)
-    static void ClaudeView(AutomationElement w, out bool chatView, out bool stopShown, out string session)
+    static void ClaudeView(El w, out bool chatView, out bool stopShown, out string session)
     {
         chatView = true;
         stopShown = false;
         session = null;                 // Code 화면에 띄워 둔 세션 제목 ("제목, 세션 이름 바꾸기" 버튼)
-        var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
-        foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
+        foreach (var b in w.FindAll(El.Descendants, El.TypeIs(El.Button)))
         {
             string n;
-            try { n = b.Current.Name ?? ""; } catch { continue; }
+            try { n = b.Name; } catch { continue; }
             if (n == "터미널" || n == "세션 패널" || n == "Terminal") chatView = false;
             if (n == "응답 중지" || n == "Stop response") stopShown = true;
             foreach (var tail in new[] { ", 세션 이름 바꾸기", ", Rename session" })
@@ -249,20 +311,18 @@ class ChatGptWatch
         return hit * 4 >= n;
     }
 
-    static void Open(string process, Func<AutomationElement, bool> isRow, string title)
+    static void Open(string process, Func<El, bool> isRow, string title)
     {
         foreach (var w in AppWindows(process))
         {
-            var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
-            foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
+            foreach (var b in w.FindAll(El.Descendants, El.TypeIs(El.Button)))
             {
                 try
                 {
-                    if (b.Current.Name == title && isRow(b))
+                    if (b.Name == title && isRow(b))
                     {
-                        object p;
-                        if (b.TryGetCurrentPattern(InvokePattern.Pattern, out p))
-                            ((InvokePattern)p).Invoke();
+                        var p = b.Pattern<UIA.IUIAutomationInvokePattern>(El.InvokeId);
+                        if (p != null) p.Invoke();
                         return;
                     }
                 }
@@ -272,22 +332,18 @@ class ChatGptWatch
     }
 
     // ---- Claude 앱 Code 세션에 답 보내기 (창을 앞으로 가져오지 않음) ----
-    static AutomationElement ByName(AutomationElement w, string name, ControlType type)
+    static El ByName(El w, string name, int type)
     {
-        var cond = new AndCondition(
-            new PropertyCondition(AutomationElement.NameProperty, name),
-            new PropertyCondition(AutomationElement.ControlTypeProperty, type));
-        return w.FindFirst(TreeScope.Descendants, cond);
+        return w.FindFirst(El.Descendants, El.NameAndType(name, type));
     }
 
     // 지금 화면의 세션 제목 = "제목, 세션 이름 바꾸기" 버튼
-    static string CurrentSession(AutomationElement w)
+    static string CurrentSession(El w)
     {
-        var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
-        foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
+        foreach (var b in w.FindAll(El.Descendants, El.TypeIs(El.Button)))
         {
             string n;
-            try { n = b.Current.Name ?? ""; } catch { continue; }
+            try { n = b.Name; } catch { continue; }
             foreach (var tail in new[] { ", 세션 이름 바꾸기", ", Rename session" })
                 if (n.EndsWith(tail)) return n.Substring(0, n.Length - tail.Length);
         }
@@ -295,14 +351,13 @@ class ChatGptWatch
     }
 
     // 왼쪽 목록의 세션 줄 (이름이 제목과 같거나 "제목 Claude 시작 위치: …"처럼 뒤에 덧붙은 것)
-    static AutomationElement SessionRow(AutomationElement w, string title)
+    static El SessionRow(El w, string title)
     {
-        var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
-        foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
+        foreach (var b in w.FindAll(El.Descendants, El.TypeIs(El.Button)))
         {
             try
             {
-                string n = b.Current.Name ?? "";
+                string n = b.Name;
                 if ((n == title || n.StartsWith(title + " ")) && IsClaudeRow(b)) return b;
             }
             catch { }
@@ -313,7 +368,7 @@ class ChatGptWatch
     // 그 세션으로 화면을 바꾸고(필요하면) 입력창에 글을 넣어 '보내기'를 누른 뒤, 원래 보던 세션으로 돌려놓는다.
     // 돌려주는 값: "ok" 또는 사용자에게 보여 줄 이유
     // 창을 안 보이게 깨우고 → 그 세션으로 바꾸고 → work → 원래 세션으로 돌려놓고 → 창도 원래대로
-    static string InSession(string title, Func<AutomationElement, string> work)
+    static string InSession(string title, Func<El, string> work)
     {
         var wins = AppWindows("claude");
         if (wins.Count == 0) return "Claude 앱이 열려 있지 않아요";
@@ -322,10 +377,10 @@ class ChatGptWatch
         try
         {
             Log("시작: " + title);
-            var hwnd = new IntPtr(w.Current.NativeWindowHandle);
+            var hwnd = w.Hwnd;
             shown = Wake(hwnd);
             if (shown.Ghost) Log(shown.Iconic ? "최소화돼 있어서 안 보이게 되살림" : "뒤에 있어서 안 보이게 깨움");
-            w.FindAll(TreeScope.Descendants, Condition.TrueCondition);   // 처음 읽을 땐 일부만 보여서 한 번 깨운다
+            w.FindAll(El.Descendants, El.True);   // 처음 읽을 땐 일부만 보여서 한 번 깨운다
             string back = CurrentSession(w);
             if (back == null) return "Claude 앱을 Code 화면으로 두고 다시 보내 주세요";
             if (back != title)
@@ -459,22 +514,22 @@ class ChatGptWatch
         return ok;
     }
 
-    static HashSet<string> ButtonNames(AutomationElement scope)
+    static HashSet<string> ButtonNames(El scope)
     {
         var names = new HashSet<string>();
-        foreach (AutomationElement b in scope.FindAll(TreeScope.Descendants, Condition.TrueCondition))
+        foreach (var b in scope.FindAll(El.Descendants, El.True))
             try
             {
-                var ct = b.Current.ControlType;
-                if (ct == ControlType.Button || ct == ControlType.Image)
-                    names.Add(ct.ProgrammaticName + ":" + (b.Current.Name ?? ""));
+                int ct = b.Type;
+                if (ct == El.Button) names.Add("Button:" + b.Name);
+                else if (ct == El.Image) names.Add("Image:" + b.Name);
             }
             catch { }
         return names;
     }
 
     // 입력창에 이미지를 붙여넣는다. 실패하면 이유, 성공하면 null
-    static string PasteImages(AutomationElement scope, IntPtr hwnd, AutomationElement input, List<string> images, IntPtr restore)
+    static string PasteImages(El scope, IntPtr hwnd, El input, List<string> images, IntPtr restore)
     {
         if (images.Count == 0) return null;
         var before = ButtonNames(scope);
@@ -510,17 +565,18 @@ class ChatGptWatch
         return added.Count > 0 ? null : "이미지가 입력창에 붙지 않았어요";
     }
 
+    static string Value(UIA.IUIAutomationValuePattern vp) { return vp.CurrentValue ?? ""; }
+
     // 입력창(다음 단계 상자 답)에 글을 넣고 '보내기'
     static string Reply(string title, string text, List<string> images = null, IntPtr restore = default(IntPtr))
     {
         return InSession(title, w =>
         {
-            var ed = ByName(w, "프롬프트", ControlType.Edit);
-            object vpo;
-            if (ed == null || !ed.TryGetCurrentPattern(ValuePattern.Pattern, out vpo)) return "입력창을 찾지 못했어요";
-            var vp = (ValuePattern)vpo;
-            if ((vp.Current.Value ?? "").Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
-            var hwnd = new IntPtr(w.Current.NativeWindowHandle);
+            var ed = ByName(w, "프롬프트", El.Edit) ?? ByName(w, "Prompt", El.Edit);
+            var vp = ed == null ? null : ed.Pattern<UIA.IUIAutomationValuePattern>(El.ValueId);
+            if (vp == null) return "입력창을 찾지 못했어요";
+            if (Value(vp).Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
+            var hwnd = w.Hwnd;
             string pasted = PasteImages(w, hwnd, ed, images ?? new List<string>(), restore);
             if (pasted != null) return pasted;
             string head = text.Trim();
@@ -530,7 +586,7 @@ class ChatGptWatch
             Thread.Sleep(200);
             TypeText(hwnd, text);
             string got = "";
-            bool put = WaitFor(() => (got = (vp.Current.Value ?? "")).Contains(head), 3000);
+            bool put = WaitFor(() => (got = Value(vp)).Contains(head), 3000);
             if (!put || got.Trim().Length > text.Trim().Length + 2)
             {
                 Erase(hwnd, got.Length + 2);           // 반쯤 들어갔거나 엉뚱하게 들어간 글은 지운다
@@ -541,13 +597,13 @@ class ChatGptWatch
             for (int k = 0; k < 3; k++)
             {
                 // 글자가 들어간 뒤 '보내기'가 켜지기까지 조금 걸린다
-                AutomationElement send = null;
-                WaitFor(() => (send = ByName(w, "보내기", ControlType.Button) ?? ByName(w, "Send", ControlType.Button)) != null
-                              && send.Current.IsEnabled, 3000);
-                if (send == null || !send.Current.IsEnabled || !ClickOn(send, hwnd)) break;
-                if (WaitFor(() => !(vp.Current.Value ?? "").Contains(head), 2000)) { Log("보냄"); return "ok"; }
+                El send = null;
+                WaitFor(() => (send = ByName(w, "보내기", El.Button) ?? ByName(w, "Send", El.Button)) != null
+                              && send.Enabled, 3000);
+                if (send == null || !send.Enabled || !ClickOn(send, hwnd)) break;
+                if (WaitFor(() => !Value(vp).Contains(head), 2000)) { Log("보냄"); return "ok"; }
             }
-            Erase(hwnd, (vp.Current.Value ?? "").Length + 2);
+            Erase(hwnd, Value(vp).Length + 2);
             return "보내기 버튼을 누르지 못했어요";
         });
     }
@@ -558,56 +614,55 @@ class ChatGptWatch
         return InSession(title, w =>
         {
             bool isOther = !string.IsNullOrEmpty(other);
-            AutomationElement opt = null;
-            var cond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
-            foreach (AutomationElement b in w.FindAll(TreeScope.Descendants, cond))
+            El opt = null;
+            UIA.IUIAutomationTogglePattern tp = null;
+            foreach (var b in w.FindAll(El.Descendants, El.TypeIs(El.Button)))
             {
                 string n;
-                try { n = b.Current.Name ?? ""; } catch { continue; }
+                try { n = b.Name; } catch { continue; }
                 bool hit = isOther ? n == "기타" || n == "Other"
                                    : n == label || n.StartsWith(label + " ");
-                object tpo;
-                if (hit && b.TryGetCurrentPattern(TogglePattern.Pattern, out tpo)) { opt = b; break; }
+                if (!hit) continue;
+                try { tp = b.Pattern<UIA.IUIAutomationTogglePattern>(El.ToggleId); } catch { continue; }
+                if (tp != null) { opt = b; break; }
             }
             if (opt == null) return "그 세션에서 질문 카드를 찾지 못했어요 (이미 답했을 수 있어요)";
-            var hwnd = new IntPtr(w.Current.NativeWindowHandle);
-            var tp = (TogglePattern)opt.GetCurrentPattern(TogglePattern.Pattern);
-            Log("선택지 찾음: " + opt.Current.Name + " / 상태 " + tp.Current.ToggleState);
+            var hwnd = w.Hwnd;
+            Func<bool> isOn = () => tp.CurrentToggleState == UIA.ToggleState.ToggleState_On;
+            Log("선택지 찾음: " + opt.Name + " / 상태 " + (isOn() ? "On" : "Off"));
             // 막 되살린 창은 처음 1~2초의 클릭을 버리므로(나중에 처리되지도 않음) 골라질 때까지 0.7초마다 다시 누른다
-            bool on = tp.Current.ToggleState == ToggleState.On;
+            bool on = isOn();
             for (int k = 0; k < 14 && !on; k++)
             {
                 if (!ClickOn(opt, hwnd)) return "선택지 자리를 찾지 못했어요";
-                on = WaitFor(() => tp.Current.ToggleState == ToggleState.On, 700);
+                on = WaitFor(isOn, 700);
                 Log("선택지 클릭 " + (k + 1) + "번째 → " + (on ? "골라짐" : "아직"));
             }
             if (!on) return "선택이 확인되지 않아 제출하지 않았어요";
             if (isOther)
             {
-                AutomationElement box = null;
-                WaitFor(() => (box = ByName(w, "기타 옵션", ControlType.Edit)) != null, 3000);
-                object vpo;
-                if (box == null || !box.TryGetCurrentPattern(ValuePattern.Pattern, out vpo))
-                    return "기타 입력칸을 찾지 못해 제출하지 않았어요";
-                var vp = (ValuePattern)vpo;
+                El box = null;
+                WaitFor(() => (box = ByName(w, "기타 옵션", El.Edit)) != null, 3000);
+                var vp = box == null ? null : box.Pattern<UIA.IUIAutomationValuePattern>(El.ValueId);
+                if (vp == null) return "기타 입력칸을 찾지 못해 제출하지 않았어요";
                 string head = other.Trim();
                 head = head.Substring(0, Math.Min(10, head.Length));
                 if (!ClickOn(box, hwnd)) return "기타 입력칸 자리를 찾지 못했어요";
                 Thread.Sleep(200);
-                Erase(hwnd, (vp.Current.Value ?? "").Length);   // 전에 써 둔 글이 있으면 비운다
+                Erase(hwnd, Value(vp).Length);   // 전에 써 둔 글이 있으면 비운다
                 TypeText(hwnd, other);
-                if (!WaitFor(() => (vp.Current.Value ?? "").Contains(head), 3000))
+                if (!WaitFor(() => Value(vp).Contains(head), 3000))
                     return "기타 입력칸에 글을 넣지 못해 제출하지 않았어요";
             }
             // 제출되면 카드(제출 버튼)가 사라진다. 남아 있으면 아직 안 간 것이라 다시 누른다
             for (int k = 0; k < 3; k++)
             {
-                var submit = ByName(w, "제출", ControlType.Button) ?? ByName(w, "Submit", ControlType.Button);
+                var submit = ByName(w, "제출", El.Button) ?? ByName(w, "Submit", El.Button);
                 if (submit == null) return k == 0 ? "제출 버튼을 찾지 못했어요" : "ok";
-                if (!submit.Current.IsEnabled || !ClickOn(submit, hwnd)) return "제출 버튼을 누르지 못했어요";
+                if (!submit.Enabled || !ClickOn(submit, hwnd)) return "제출 버튼을 누르지 못했어요";
                 Log("제출 클릭 " + (k + 1) + "번째");
-                if (WaitFor(() => ByName(w, "제출", ControlType.Button) == null
-                                  && ByName(w, "Submit", ControlType.Button) == null, 2500)) return "ok";
+                if (WaitFor(() => ByName(w, "제출", El.Button) == null
+                                  && ByName(w, "Submit", El.Button) == null, 2500)) return "ok";
             }
             return "제출이 확인되지 않았어요. Claude 앱에서 확인해 주세요";
         });
@@ -615,32 +670,30 @@ class ChatGptWatch
 
     // ---- VS Code의 Claude Code 패널 (창마다 웹 화면 안에 있고, 위쪽 제목 버튼이 세션 이름) ----
     // 그 세션 패널을 찾아 창을 안 보이게 깨운 뒤 work(패널, 창) → 창 원래대로. 세션을 바꿔 주지는 않는다.
-    static string InVsCode(string title, Func<AutomationElement, IntPtr, string> work)
+    static string InVsCode(string title, Func<El, IntPtr, string> work)
     {
         var wins = AppWindows("Code");
         if (wins.Count == 0) return "VS Code가 열려 있지 않아요";
         foreach (var w in wins)
         {
-            AutomationElement panel = null;
+            El panel = null;
             try
             {
-                w.FindAll(TreeScope.Descendants, Condition.TrueCondition);   // 처음엔 일부만 보여서 한 번 깨운다
-                foreach (AutomationElement b in w.FindAll(TreeScope.Descendants,
-                             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)))
+                w.FindAll(El.Descendants, El.True);   // 처음엔 일부만 보여서 한 번 깨운다
+                foreach (var b in w.FindAll(El.Descendants, El.TypeIs(El.Button)))
                 {
-                    if ((b.Current.ClassName ?? "").Contains("titleText") && (b.Current.Name ?? "").Trim() == title)
+                    if (b.ClassName.Contains("titleText") && b.Name.Trim() == title)
                     {
                         // 제목 버튼에서 위로 올라가 그 패널의 웹 화면 전체(Document)를 범위로 쓴다
-                        var walker = TreeWalker.ControlViewWalker;
-                        for (var p = walker.GetParent(b); p != null; p = walker.GetParent(p))
-                            if (p.Current.ControlType == ControlType.Document) { panel = p; break; }
+                        for (var p = b.Parent(); p != null; p = p.Parent())
+                            if (p.Type == El.Document) { panel = p; break; }
                         break;
                     }
                 }
             }
             catch { continue; }
             if (panel == null) continue;
-            var hwnd = new IntPtr(w.Current.NativeWindowHandle);
+            var hwnd = w.Hwnd;
             Shown shown = null;
             try
             {
@@ -656,18 +709,17 @@ class ChatGptWatch
         return "VS Code에서 그 세션(" + title + ") 화면을 찾지 못했어요. Claude 패널에 그 세션을 열어 두세요";
     }
 
-    static AutomationElement ByClass(AutomationElement scope, string part, ControlType type)
+    static El ByClass(El scope, string part, int type)
     {
-        foreach (AutomationElement e in scope.FindAll(TreeScope.Descendants,
-                     new PropertyCondition(AutomationElement.ControlTypeProperty, type)))
-            try { if ((e.Current.ClassName ?? "").Contains(part)) return e; } catch { }
+        foreach (var e in scope.FindAll(El.Descendants, El.TypeIs(type)))
+            try { if (e.ClassName.Contains(part)) return e; } catch { }
         return null;
     }
 
     // VS Code 입력창은 비어 있으면 안내 문구("Ask Claude to edit…", "Queue another message…")를 값으로 돌려준다
-    static string VsText(ValuePattern vp)
+    static string VsText(UIA.IUIAutomationValuePattern vp)
     {
-        string v = vp.Current.Value ?? "";
+        string v = Value(vp);
         return v.EndsWith("…") && v.Length < 80 && v.IndexOf('\n') < 0 ? "" : v;
     }
 
@@ -675,11 +727,10 @@ class ChatGptWatch
     {
         return InVsCode(title, (p, hwnd) =>
         {
-            var ed = ByClass(p, "messageInput", ControlType.Edit);
-            object vpo;
-            if (ed == null || !ed.TryGetCurrentPattern(ValuePattern.Pattern, out vpo)) return "입력창을 찾지 못했어요";
-            var vp = (ValuePattern)vpo;
-            Log("입력창 값: [" + (vp.Current.Value ?? "") + "]");
+            var ed = ByClass(p, "messageInput", El.Edit);
+            var vp = ed == null ? null : ed.Pattern<UIA.IUIAutomationValuePattern>(El.ValueId);
+            if (vp == null) return "입력창을 찾지 못했어요";
+            Log("입력창 값: [" + Value(vp) + "]");
             if (VsText(vp).Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
             string pasted = PasteImages(p, hwnd, ed, images ?? new List<string>(), restore);
             if (pasted != null) return pasted;
@@ -689,7 +740,7 @@ class ChatGptWatch
             Thread.Sleep(200);
             TypeText(hwnd, text);
             string got = "";
-            if (!WaitFor(() => (got = (vp.Current.Value ?? "")).Contains(head), 3000))
+            if (!WaitFor(() => (got = Value(vp)).Contains(head), 3000))
             {
                 Erase(hwnd, got.Length + 2);
                 return "입력창에 글을 넣지 못했어요";
@@ -699,10 +750,10 @@ class ChatGptWatch
             {
                 // 답하는 중엔 이 버튼이 Stop 이라 누르면 멈춰 버린다 → Stop 이 아닐 때만 누르고,
                 // 계속 Stop 이면 Enter 신호로 보낸다 (답하는 중이면 VS Code가 대기열에 넣음)
-                AutomationElement send = null;
-                WaitFor(() => (send = ByClass(p, "sendButton", ControlType.Button)) != null
-                              && send.Current.IsEnabled && send.Current.Name != "Stop", 1500);
-                if (send != null && send.Current.IsEnabled && send.Current.Name != "Stop")
+                El send = null;
+                WaitFor(() => (send = ByClass(p, "sendButton", El.Button)) != null
+                              && send.Enabled && send.Name != "Stop", 1500);
+                if (send != null && send.Enabled && send.Name != "Stop")
                 {
                     if (!ClickOn(send, hwnd)) break;
                 }
@@ -713,7 +764,7 @@ class ChatGptWatch
                     PostMessage(hwnd, 0x0102, new IntPtr(0x0D), new IntPtr(0x001C0001));            // WM_CHAR
                     PostMessage(hwnd, 0x0101, new IntPtr(0x0D), new IntPtr(unchecked((int)0xC01C0001)));
                 }
-                if (WaitFor(() => !(vp.Current.Value ?? "").Contains(head), 2000)) { Log("보냄"); return "ok"; }
+                if (WaitFor(() => !Value(vp).Contains(head), 2000)) { Log("보냄"); return "ok"; }
             }
             Erase(hwnd, VsText(vp).Length + 2);
             return "보내기 버튼을 누르지 못했어요 (아직 답하는 중일 수 있어요)";
@@ -725,61 +776,58 @@ class ChatGptWatch
         return InVsCode(title, (p, hwnd) =>
         {
             bool isOther = !string.IsNullOrEmpty(other);
-            AutomationElement opt = null;
-            foreach (AutomationElement b in p.FindAll(TreeScope.Descendants,
-                         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.RadioButton)))
+            El opt = null;
+            foreach (var b in p.FindAll(El.Descendants, El.TypeIs(El.RadioButton)))
             {
                 string n;
-                try { n = (b.Current.Name ?? "").Trim(); } catch { continue; }
+                try { n = b.Name.Trim(); } catch { continue; }
                 if (isOther ? n == "Other" || n == "기타" : n == label || n.StartsWith(label + " ")) { opt = b; break; }
             }
             if (opt == null) return "그 세션에서 질문 카드를 찾지 못했어요 (이미 답했을 수 있어요)";
-            var sel = (SelectionItemPattern)opt.GetCurrentPattern(SelectionItemPattern.Pattern);
-            Log("선택지 찾음: " + opt.Current.Name + " / 골라짐 " + sel.Current.IsSelected);
-            bool on = sel.Current.IsSelected;
+            var sel = opt.Pattern<UIA.IUIAutomationSelectionItemPattern>(El.SelectionItemId);
+            if (sel == null) return "그 세션에서 질문 카드를 찾지 못했어요 (이미 답했을 수 있어요)";
+            Func<bool> isOn = () => sel.CurrentIsSelected != 0;
+            Log("선택지 찾음: " + opt.Name + " / 골라짐 " + isOn());
+            bool on = isOn();
             for (int k = 0; k < 14 && !on; k++)
             {
                 if (!ClickOn(opt, hwnd)) return "선택지 자리를 찾지 못했어요";
-                on = WaitFor(() => sel.Current.IsSelected, 700);
+                on = WaitFor(isOn, 700);
                 Log("선택지 클릭 " + (k + 1) + "번째 → " + (on ? "골라짐" : "아직"));
             }
             if (!on) return "선택이 확인되지 않아 제출하지 않았어요";
             if (isOther)
             {
                 // Other 를 고르면 카드 안에 입력칸이 생긴다 (아래 메시지 입력창과는 다른 것)
-                AutomationElement box = null;
+                El box = null;
                 WaitFor(() =>
                 {
-                    foreach (AutomationElement x in p.FindAll(TreeScope.Descendants,
-                                 new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit)))
-                        if (!(x.Current.ClassName ?? "").Contains("messageInput")) { box = x; return true; }
+                    foreach (var x in p.FindAll(El.Descendants, El.TypeIs(El.Edit)))
+                        if (!x.ClassName.Contains("messageInput")) { box = x; return true; }
                     return false;
                 }, 3000);
-                object vpo;
-                if (box == null || !box.TryGetCurrentPattern(ValuePattern.Pattern, out vpo))
-                    return "기타 입력칸을 찾지 못해 제출하지 않았어요";
-                var vp = (ValuePattern)vpo;
+                var vp = box == null ? null : box.Pattern<UIA.IUIAutomationValuePattern>(El.ValueId);
+                if (vp == null) return "기타 입력칸을 찾지 못해 제출하지 않았어요";
                 string head = other.Trim();
                 head = head.Substring(0, Math.Min(10, head.Length));
                 if (!ClickOn(box, hwnd)) return "기타 입력칸 자리를 찾지 못했어요";
                 Thread.Sleep(200);
-                Erase(hwnd, (vp.Current.Value ?? "").Length);
+                Erase(hwnd, Value(vp).Length);
                 TypeText(hwnd, other);
-                if (!WaitFor(() => (vp.Current.Value ?? "").Contains(head), 3000))
+                if (!WaitFor(() => Value(vp).Contains(head), 3000))
                     return "기타 입력칸에 글을 넣지 못해 제출하지 않았어요";
             }
-            Func<AutomationElement> submitBtn = () =>
+            Func<El> submitBtn = () =>
             {
-                foreach (AutomationElement b in p.FindAll(TreeScope.Descendants,
-                             new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button)))
-                    try { if ((b.Current.Name ?? "").Contains("Submit")) return b; } catch { }
+                foreach (var b in p.FindAll(El.Descendants, El.TypeIs(El.Button)))
+                    try { if (b.Name.Contains("Submit")) return b; } catch { }
                 return null;
             };
             for (int k = 0; k < 3; k++)
             {
                 var submit = submitBtn();
                 if (submit == null) return k == 0 ? "제출 버튼을 찾지 못했어요" : "ok";
-                if (!submit.Current.IsEnabled || !ClickOn(submit, hwnd)) return "제출 버튼을 누르지 못했어요";
+                if (!submit.Enabled || !ClickOn(submit, hwnd)) return "제출 버튼을 누르지 못했어요";
                 Log("제출 클릭 " + (k + 1) + "번째");
                 if (WaitFor(() => submitBtn() == null, 2500)) return "ok";
             }
@@ -799,10 +847,10 @@ class ChatGptWatch
         if (parts.Length > 4 && long.TryParse(parts[4], out h)) restore = new IntPtr(h);
     }
 
-    static long Hwnd(List<AutomationElement> wins)
+    static long Hwnd(List<El> wins)
     {
         foreach (var w in wins)
-            try { return w.Current.NativeWindowHandle; } catch { }
+            try { return w.Hwnd.ToInt64(); } catch { }
         return 0;
     }
 
@@ -903,13 +951,12 @@ class ChatGptWatch
                 foreach (var w in gpt)
                 {
                     titles.AddRange(WorkingTitles(w, IsGptRow).Where(t => !titles.Contains(t)));
-                    if (!seen.Contains("chatgpt") && OnScreen(new IntPtr(w.Current.NativeWindowHandle)))
+                    if (!seen.Contains("chatgpt") && OnScreen(w.Hwnd))
                     {
                         // 웹 화면 전체(Document)의 이름 = 지금 열어 둔 대화 제목
-                        var doc = w.FindFirst(TreeScope.Descendants,
-                            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document));
+                        var doc = w.FindFirst(El.Descendants, El.TypeIs(El.Document));
                         seen.Add("chatgpt");
-                        gptSession = doc == null ? "" : (doc.Current.Name ?? "").Trim();
+                        gptSession = doc == null ? "" : doc.Name.Trim();
                     }
                 }
 
@@ -917,13 +964,13 @@ class ChatGptWatch
                 var ctitles = new List<string>();
                 bool claudeOk = false;
                 foreach (var w in AppWindows("Code"))
-                    if (!seen.Contains("code") && OnScreen(new IntPtr(w.Current.NativeWindowHandle))) seen.Add("code");
+                    if (!seen.Contains("code") && OnScreen(w.Hwnd)) seen.Add("code");
                 foreach (var w in cla)
                 {
                     bool chatView, stopShown;
                     string session;
                     ClaudeView(w, out chatView, out stopShown, out session);
-                    if (session != null && seenSession == "" && OnScreen(new IntPtr(w.Current.NativeWindowHandle)))
+                    if (session != null && seenSession == "" && OnScreen(w.Hwnd))
                     {
                         seen.Add("claude");
                         seenSession = session;
@@ -955,6 +1002,9 @@ class ChatGptWatch
                 last = msg;
                 lastSent = DateTime.Now;
             }
+            // 다 쓴 화면 읽기 요소(COM)를 바로 놓아 준다. 안 하면 .NET 이 언젠가 치울 때까지 앱 쪽 연결이 남는다
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
             Thread.Sleep(cmd != null ? 300 : 2000);
         }
     }
