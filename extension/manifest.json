@@ -1,7 +1,7 @@
 {
     "manifest_version":  3,
     "name":  "TaskPet for AI Chats",
-    "version":  "1.2.0",
+    "version":  "1.3.1",
     "default_locale":  "en",
     "description":  "__MSG_extDesc__",
     "key":  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq2L2yRjxop2NXIzlyCU7uxat6TGJM/MY5FWazDSBsuSsUYt47VTE8f5YZRxWy80cxky9ImFjgRns15ruZXnHpiJi63yaQ02rTnI9Cs6Z+Yu38y1nL5IAZ3wOLQWjdTa7MC/J4147xQnNT3DZZ2qvwFzQ3UwpZEu/miX+zFI57okseWO33g9eghCZscQkHWnPvbSyZwcMqcZMnY7pFhn243kH/saqbMKeLVrrXgIRM/2WWCrpyAIj+QrMzg6OYmw2Dd9XktqR4Q3YWZDyIlEeNvzS6F6Ajk9U0IxhrGRz8l6zUNXz1jZKRzU73f70FSGICwhvDw179TAzE0WceServwIDAQAB",

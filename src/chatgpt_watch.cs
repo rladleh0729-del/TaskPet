@@ -10,6 +10,9 @@
 //              replyclaude<TAB>세션 제목<TAB>글(base64) → Claude 앱 그 Code 세션에 글을 넣어 보냄 (로봇에서 선택지를 눌렀을 때만)
 //              cardclaude<TAB>세션 제목<TAB>선택지(base64)<TAB>기타 글(base64) → 그 세션의 질문 카드에서 골라 제출
 //              replyvscode / cardvscode (같은 모양) → VS Code의 Claude Code 패널(제목이 그 세션인 것)에 같은 일
+//              gptchat<TAB>대화 제목 → ChatGPT 앱에 지금 열린 대화가 그것이면 최근 메시지를 읽어
+//                {"gptchat":{"title":"…","ok":true,"msgs":[["me","…"],["ai","…"]]}} (로봇에서 그 줄을 펼쳐 볼 때만)
+//              replygpt<TAB>대화 제목<TAB>글(base64) → ChatGPT 앱 그 대화에 글을 넣어 보냄 → {"reply":"ok"|이유}
 //   Claude 창은 앞으로 가져오지 않는다. 다른 창 뒤에 가려져 있으면 그대로 두고 클릭 신호만 창에 보낸다.
 //   최소화돼 있으면 앱이 완전히 쉬어서, 처리하는 동안만 눈에 안 보이게(투명·클릭 통과) 되살렸다가 다시 최소화한다.
 //   쓰던 창의 포커스와 마우스는 건드리지 않는다. 단계 기록은 이 프로그램 옆 card.log 에 남긴다.
@@ -22,6 +25,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using UIA = Interop.UIAutomationClient;
 
@@ -31,9 +35,10 @@ class El
     public static readonly UIA.IUIAutomation A = new UIA.CUIAutomation8();
     public const UIA.TreeScope Children = UIA.TreeScope.TreeScope_Children;
     public const UIA.TreeScope Descendants = UIA.TreeScope.TreeScope_Descendants;
-    public const int Button = 50000, Edit = 50004, Image = 50006, RadioButton = 50013, StatusBar = 50017, Document = 50030;
+    public const int Button = 50000, Edit = 50004, Hyperlink = 50005, Image = 50006, RadioButton = 50013,
+                     StatusBar = 50017, Text = 50020, Group = 50026, DataItem = 50029, Document = 50030;
     public const int InvokeId = 10000, ValueId = 10002, SelectionItemId = 10010, ToggleId = 10015, ScrollItemId = 10017;
-    const int TypeP = 30003, NameP = 30005, ClassP = 30012;
+    const int TypeP = 30003, NameP = 30005, ClassP = 30012, RectP = 30001, AutoIdP = 30011;
 
     // 목록을 훑을 땐 이름·클래스·종류를 한 번에 받아 온다 (요소마다 앱에 따로 묻지 않게)
     static readonly UIA.IUIAutomationCacheRequest Cache = MakeCache();
@@ -43,6 +48,8 @@ class El
         c.AddProperty(TypeP);
         c.AddProperty(NameP);
         c.AddProperty(ClassP);
+        c.AddProperty(RectP);
+        c.AddProperty(AutoIdP);
         return c;
     }
 
@@ -54,6 +61,8 @@ class El
     public static El Root { get { return Of(A.GetRootElement(), false); } }
     public static UIA.IUIAutomationCondition True { get { return A.CreateTrueCondition(); } }
     public static UIA.IUIAutomationCondition TypeIs(int type) { return A.CreatePropertyCondition(TypeP, type); }
+    public static UIA.IUIAutomationCondition TypeIn(int a, int b) { return A.CreateOrCondition(TypeIs(a), TypeIs(b)); }
+    public static UIA.IUIAutomationCondition IdIs(string id) { return A.CreatePropertyCondition(AutoIdP, id); }
     public static UIA.IUIAutomationCondition NameAndType(string name, int type)
     {
         return A.CreateAndCondition(A.CreatePropertyCondition(NameP, name), TypeIs(type));
@@ -67,6 +76,8 @@ class El
     public IntPtr Hwnd { get { return E.CurrentNativeWindowHandle; } }
     public bool Enabled { get { return E.CurrentIsEnabled != 0; } }
     public UIA.tagRECT Rect { get { return E.CurrentBoundingRectangle; } }
+    public UIA.tagRECT CachedRect { get { return cached ? E.CachedBoundingRectangle : E.CurrentBoundingRectangle; } }
+    public string AutomationId { get { return (cached ? E.CachedAutomationId : E.CurrentAutomationId) ?? ""; } }
 
     public List<El> FindAll(UIA.TreeScope scope, UIA.IUIAutomationCondition cond)
     {
@@ -142,6 +153,12 @@ class ChatGptWatch
             PostMessage(hwnd, 0x0102, new IntPtr(c == '\r' || c == '\n' ? ' ' : c), new IntPtr(1));
     }
 
+    // 입력창에 실제로 들어가는 모양 (줄바꿈 → 띄어쓰기). 들어갔는지·보내졌는지 확인할 때도 이 글로 비교한다
+    static string OneLine(string text)
+    {
+        return text.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ');
+    }
+
     // 잘못 들어간 글을 지운다 (Backspace 신호)
     static void Erase(IntPtr hwnd, int n)
     {
@@ -206,7 +223,9 @@ class ChatGptWatch
 
     static List<El> AppWindows(string process)
     {
-        var pids = new HashSet<int>(Process.GetProcessesByName(process).Select(p => p.Id));
+        // ChatGPT 데스크톱 앱은 프로세스 이름이 'ChatGPT Classic' 으로 바뀌었다 → 둘 다
+        var names = process == "ChatGPT" ? new[] { "ChatGPT", "ChatGPT Classic" } : new[] { process };
+        var pids = new HashSet<int>(names.SelectMany(n => Process.GetProcessesByName(n)).Select(p => p.Id));
         var list = new List<El>();
         if (pids.Count == 0) return list;
         foreach (var w in El.Root.FindAll(El.Children, El.True))
@@ -219,7 +238,14 @@ class ChatGptWatch
     // ChatGPT 사이드바 대화 줄 = ClassName에 sidebar-item 이 들어간 버튼
     static bool IsGptRow(El e)
     {
-        return e.Type == El.Button && e.ClassName.Contains("sidebar-item");
+        if (e.Type == El.Button && e.ClassName.Contains("sidebar-item")) return true;
+        if (e.Type != El.Hyperlink || !e.ClassName.Contains("__menu-item") || e.Name.Trim().Length == 0) return false;
+        try
+        {
+            var v = e.Pattern<UIA.IUIAutomationValuePattern>(El.ValueId);
+            return v != null && (v.CurrentValue ?? "").Contains("/c/");
+        }
+        catch { return false; }
     }
 
     // Claude 사이드바 대화 줄 = 이름 있는 text-start 버튼 ('…에 대한 더 많은 옵션' 버튼은 제외)
@@ -315,7 +341,7 @@ class ChatGptWatch
     {
         foreach (var w in AppWindows(process))
         {
-            foreach (var b in w.FindAll(El.Descendants, El.TypeIs(El.Button)))
+            foreach (var b in w.FindAll(El.Descendants, El.TypeIn(El.Button, El.Hyperlink)))
             {
                 try
                 {
@@ -329,6 +355,192 @@ class ChatGptWatch
                 catch { }
             }
         }
+    }
+
+    // ---- ChatGPT 앱: 지금 열린 대화의 메시지 읽기 · 그 대화에 답 보내기 ----
+    // 화면 구조: main 아래에 메시지 글(Text·목록·표)이 평평하게 늘어서고, 메시지마다 끝에 '작업' 묶음(복사·편집 버튼)이 온다.
+    // 답 쪽 묶음에는 radix- 로 시작하는 버튼(평가·모델 바꾸기)이 있고, 내 메시지 쪽에는 없다 → 언어와 상관없이 구분.
+    static string GptOpenTitle(El w)
+    {
+        var doc = w.FindFirst(El.Descendants, El.TypeIs(El.Document));
+        return doc == null ? "" : doc.Name.Trim();
+    }
+
+    static List<string[]> GptMessages(El w, int max)
+    {
+        var msgs = new List<string[]>();
+        var main = w.FindFirst(El.Descendants, El.IdIs("main"));
+        if (main == null) return msgs;
+        var buf = new StringBuilder();
+        var live = new StringBuilder();      // 마지막 묶음 뒤, 답 칸(text-message)에서 나온 글 = 아직 쓰는 중인 답
+        int lastTop = int.MinValue, lastBottom = int.MinValue, liveTop = int.MinValue, liveBottom = int.MinValue;
+        bool lastAi = false;
+        Action<StringBuilder, El> add = (b, x) =>
+        {
+            string n = x.Name;
+            if (n.Trim().Length == 0) return;
+            var r = x.CachedRect;
+            bool isLive = b == live;
+            int pt = isLive ? liveTop : lastTop, pb = isLive ? liveBottom : lastBottom;
+            // 앞 조각과 위아래로 겹치면 같은 줄(굵게 쓴 부분·줄 끝에서 이어진 조각)이라 붙이고, 아니면 줄바꿈.
+            // 표 칸끼리는 같은 줄이어도 ' | ' 로 나눈다
+            if (b.Length > 0)
+            {
+                bool sameLine = r.top < pb - 2 && r.bottom > pt + 2;
+                b.Append(sameLine ? (x.Type == El.DataItem ? " | " : "") : "\n");
+            }
+            b.Append(n);
+            if (isLive) { liveTop = r.top; liveBottom = r.bottom; } else { lastTop = r.top; lastBottom = r.bottom; }
+        };
+        foreach (var c in main.FindAll(El.Children, El.True))
+        {
+            try
+            {
+                if (c.Type == El.Group && c.ClassName.Contains("touch:-m"))      // 메시지 하나 끝 ('작업' 묶음)
+                {
+                    lastAi = c.FindAll(El.Descendants, El.TypeIs(El.Button)).Any(b => b.AutomationId.StartsWith("radix-"));
+                    // 그림만 보낸 내 메시지는 빈 글로 (로봇이 '(이미지)'로 보여 줌)
+                    if (buf.Length > 0 || !lastAi) msgs.Add(new[] { lastAi ? "ai" : "me", buf.ToString() });
+                    buf.Clear();
+                    live.Clear();
+                    lastTop = liveTop = lastBottom = liveBottom = int.MinValue;
+                    continue;
+                }
+                bool answerBox = c.ClassName.Contains("text-message");
+                if (c.Type == El.Text) { add(buf, c); continue; }
+                foreach (var d in c.FindAll(El.Descendants, El.TypeIn(El.Text, El.DataItem)))
+                {
+                    add(buf, d);
+                    if (answerBox) add(live, d);
+                }
+            }
+            catch { }
+        }
+        // 마지막이 내 메시지였으면 그 뒤 답 칸의 글은 쓰는 중인 답 (맨 아래 안내문 등 다른 글은 뺀다)
+        if (!lastAi && live.Length > 0) msgs.Add(new[] { "ai", live.ToString() });
+        return msgs.Count > max ? msgs.GetRange(msgs.Count - max, max) : msgs;
+    }
+
+    static string GptChat(string title)
+    {
+        foreach (var w in AppWindows("ChatGPT"))
+        {
+            if (GptOpenTitle(w) != title) continue;
+            var msgs = GptMessages(w, 24);
+            var sb = new StringBuilder("{\"gptchat\":{\"title\":" + Json(title) + ",\"ok\":true,\"msgs\":[");
+            for (int i = 0; i < msgs.Count; i++)
+            {
+                string t = msgs[i][1];
+                if (t.Length > 6000) t = "…" + t.Substring(t.Length - 6000);
+                sb.Append(i > 0 ? "," : "").Append("[" + Json(msgs[i][0]) + "," + Json(t) + "]");
+            }
+            return sb.Append("]}}").ToString();
+        }
+        return "{\"gptchat\":{\"title\":" + Json(title) + ",\"ok\":false,\"msgs\":[]}}";
+    }
+
+    // 열어 둔 대화가 답하는 중인지: 보내기 자리(composer-submit-button)가 '답변 중지' 버튼으로 바뀐다.
+    // 이름은 앱 언어마다 달라서 '중지' 낱말로 본다 (확장 content.js 와 같은 낱말들)
+    static readonly Regex StopName = new Regex(
+        @"중지|停止|中止|ストップ|(?<![\p{L}\p{N}])(stop|detener|parar|interromp|arr[êe]t|anhalten|abbrechen|ferma|zatrzym|останов|стоп|hentikan|dừng|durdur)",
+        RegexOptions.IgnoreCase);
+
+    static bool GptAnswering(El w)
+    {
+        var b = w.FindFirst(El.Descendants, El.IdIs("composer-submit-button"));
+        return b != null && StopName.IsMatch(b.Name);
+    }
+
+    // 입력창에 쓰던 글. 비어 있으면 화면 읽기 값으로 안내 글('ChatGPT에게 물어보세요' 등)이 나오는데,
+    // 그때는 맨 앞 칸이 class="placeholder" 문단이므로 빈 것으로 본다
+    static string GptDraft(El ed, UIA.IUIAutomationValuePattern vp)
+    {
+        try
+        {
+            var first = El.A.RawViewWalker.GetFirstChildElement(ed.E);
+            if (first != null && (first.CurrentClassName ?? "").Contains("placeholder")) return "";
+        }
+        catch { }
+        return Value(vp).Trim();
+    }
+
+    // 그 대화로 바꾸고(필요하면) 입력창에 글을 넣어 Enter. 창은 앞으로 가져오지 않는다 (Claude 앱 답 보내기와 같은 방식)
+    static string ReplyGpt(string title, string text)
+    {
+        var wins = AppWindows("ChatGPT");
+        if (wins.Count == 0) return "ChatGPT 앱이 열려 있지 않아요";
+        var w = wins.FirstOrDefault(x => GptOpenTitle(x) == title)
+                ?? wins.FirstOrDefault(x => x.FindAll(El.Descendants, El.TypeIn(El.Button, El.Hyperlink))
+                                             .Any(b => b.Name == title && IsGptRow(b)))
+                ?? wins[0];
+        var shown = Wake(w.Hwnd);
+        string before = "";             // 보내기 전에 보던 대화 — 다 보내면 그리로 돌려놓는다 (Claude 앱 답 보내기처럼)
+        try
+        {
+            Log("ChatGPT 시작: " + title);
+            before = GptOpenTitle(w);
+            if (before != title)
+            {
+                if (!GptSwitch(w, title)) return "그 대화로 바꾸지 못했어요";
+                Log("대화 바꿈");
+                Thread.Sleep(400);
+            }
+            var ed = w.FindFirst(El.Descendants, El.IdIs("prompt-textarea"));
+            var vp = ed == null ? null : ed.Pattern<UIA.IUIAutomationValuePattern>(El.ValueId);
+            if (vp == null) return "입력창을 찾지 못했어요";
+            if (GptDraft(ed, vp).Length > 0) return "그 대화 입력창에 쓰던 글이 있어서 보내지 않았어요";
+            text = OneLine(text);
+            string head = text.Trim();
+            head = head.Substring(0, Math.Min(10, head.Length));
+            if (!ClickOn(ed, w.Hwnd)) return "입력창 자리를 찾지 못했어요";
+            Thread.Sleep(200);
+            TypeText(w.Hwnd, text);
+            string got = "";
+            if (!WaitFor(() => (got = Value(vp)).Contains(head), 3000))
+            {
+                Erase(w.Hwnd, got.Length + 2);
+                return "입력창에 글을 넣지 못했어요";
+            }
+            Log("입력창에 글 넣음");
+            for (int k = 0; k < 3; k++)
+            {
+                PostMessage(w.Hwnd, 0x0100, new IntPtr(0x0D), new IntPtr(0x001C0001));                  // WM_KEYDOWN Enter
+                PostMessage(w.Hwnd, 0x0101, new IntPtr(0x0D), new IntPtr(unchecked((int)0xC01C0001)));
+                if (WaitFor(() => !Value(vp).Contains(head), 2000)) { Log("보냄"); return "ok"; }
+            }
+            Erase(w.Hwnd, Value(vp).Length + 2);
+            return "보내기를 하지 못했어요";
+        }
+        finally
+        {
+            // 보던 대화가 따로 있었으면 돌려놓는다 (새 채팅 화면 'ChatGPT' 는 목록 줄이 없어 그대로)
+            try
+            {
+                if (before.Length > 0 && before != title && before != "ChatGPT" && GptOpenTitle(w) != before)
+                    Log("돌려놓기: " + (GptSwitch(w, before) ? "됨" : "못 함"));
+            }
+            catch { }
+            Unwake(shown);
+            Log("끝");
+        }
+    }
+
+    // 목록에서 그 대화 줄을 눌러 연다. 먼저 클릭 신호(창을 앞으로 끌어오지 않음), 안 바뀌면 화면 읽기 '누르기'
+    static bool GptSwitch(El w, string title)
+    {
+        El row = null;
+        foreach (var b in w.FindAll(El.Descendants, El.TypeIn(El.Button, El.Hyperlink)))
+            if (b.Name == title && IsGptRow(b)) { row = b; break; }
+        if (row == null) return false;
+        ClickOn(row, w.Hwnd);
+        if (WaitFor(() => GptOpenTitle(w) == title, 2000)) return true;
+        try
+        {
+            var inv = row.Pattern<UIA.IUIAutomationInvokePattern>(El.InvokeId);
+            if (inv != null) inv.Invoke();
+        }
+        catch { }
+        return WaitFor(() => GptOpenTitle(w) == title, 3000);
     }
 
     // ---- Claude 앱 Code 세션에 답 보내기 (창을 앞으로 가져오지 않음) ----
@@ -579,6 +791,7 @@ class ChatGptWatch
             var hwnd = w.Hwnd;
             string pasted = PasteImages(w, hwnd, ed, images ?? new List<string>(), restore);
             if (pasted != null) return pasted;
+            text = OneLine(text);
             string head = text.Trim();
             head = head.Substring(0, Math.Min(10, head.Length));
             // 입력창을 클릭 신호로 고르고 글자를 신호로 넣는다 (화면 읽기로 넣으면 앱이 창을 앞으로 가져옴)
@@ -734,6 +947,7 @@ class ChatGptWatch
             if (VsText(vp).Trim().Length > 0) return "그 세션 입력창에 쓰던 글이 있어서 보내지 않았어요";
             string pasted = PasteImages(p, hwnd, ed, images ?? new List<string>(), restore);
             if (pasted != null) return pasted;
+            text = OneLine(text);
             string head = text.Trim();
             head = head.Substring(0, Math.Min(10, head.Length));
             if (!ClickOn(ed, hwnd)) return "입력창 자리를 찾지 못했어요";
@@ -923,6 +1137,20 @@ class ChatGptWatch
                     Console.Out.WriteLine("{\"reply\":" + Json(r) + "}");
                     Console.Out.Flush();
                 }
+                if (cmd != null && cmd.StartsWith("gptchat\t"))
+                {
+                    Console.Out.WriteLine(GptChat(cmd.Substring(8)));
+                    Console.Out.Flush();
+                }
+                if (cmd != null && cmd.StartsWith("replygpt\t"))
+                {
+                    var parts = cmd.Split('\t');
+                    string r;
+                    try { r = ReplyGpt(parts[1], Encoding.UTF8.GetString(Convert.FromBase64String(parts[2]))); }
+                    catch (Exception ex) { r = "보내는 중 오류: " + ex.Message; }
+                    Console.Out.WriteLine("{\"reply\":" + Json(r) + "}");
+                    Console.Out.Flush();
+                }
                 if (cmd != null && cmd.StartsWith("cardclaude\t"))
                 {
                     // cardclaude<TAB>세션 제목<TAB>선택지(base64)<TAB>기타 글(base64) → {"reply":"ok"|이유}
@@ -951,6 +1179,13 @@ class ChatGptWatch
                 foreach (var w in gpt)
                 {
                     titles.AddRange(WorkingTitles(w, IsGptRow).Where(t => !titles.Contains(t)));
+                    // 새 화면은 목록 줄에 '작업 중' 표시가 없다 → 열어 둔 대화가 답하는 중이면 그 제목
+                    try
+                    {
+                        string open = GptAnswering(w) ? GptOpenTitle(w) : "";
+                        if (open.Length > 0 && open != "ChatGPT" && !titles.Contains(open)) titles.Add(open);
+                    }
+                    catch { }
                     if (!seen.Contains("chatgpt") && OnScreen(w.Hwnd))
                     {
                         // 웹 화면 전체(Document)의 이름 = 지금 열어 둔 대화 제목

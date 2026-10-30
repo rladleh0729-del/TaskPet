@@ -22,6 +22,10 @@ def frame(obj):
 
 p = subprocess.Popen([host, "chrome-extension://x/"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 p.stdin.write(frame({"type": "state", "state": "working", "tab": 7, "conv": "abc", "title": "한글 \"제목\""}))
+# 로봇에서 펼쳐 보는 탭의 대화 글 → web-chat 파일 (두 번 오면 나중 것으로 덮음), 보낸 답 결과 → events.jsonl
+p.stdin.write(frame({"type": "chat", "tab": 7, "working": True, "msgs": [["me", "처음"]]}))
+p.stdin.write(frame({"type": "chat", "tab": 7, "working": False, "msgs": [["me", "안녕\n둘째 줄"], ["ai", "반가워요 \"따옴표\""]]}))
+p.stdin.write(frame({"type": "sent", "tab": 7, "id": 3, "ok": False, "error": "draft"}))
 p.stdin.flush()
 time.sleep(0.8)
 
@@ -48,4 +52,11 @@ rec = json.loads(lines[0])
 print("기록:", rec["ev"], rec["d"])
 assert rec["ev"] == "web" and rec["d"]["title"] == '한글 "제목"' and rec["d"]["tab"] == 7
 assert rec["d"]["browser"] == me and rec["d"]["browser_path"].lower().endswith(".exe"), rec["d"]
+assert len(lines) == 2, lines                       # 대화 글은 events.jsonl 에 안 들어감
+sent = json.loads(lines[1])["d"]
+assert sent["type"] == "sent" and sent["error"] == "draft" and sent["browser"] == me, sent
+chat = json.load(open(os.path.join(tmp, "web-chat", f"{me}-7.json"), encoding="utf-8"))
+print("대화 파일:", chat)
+assert chat["msgs"] == [["me", "안녕\n둘째 줄"], ["ai", '반가워요 "따옴표"']] and chat["working"] is False
+assert not [f for f in os.listdir(os.path.join(tmp, "web-chat")) if f.endswith(".tmp")]
 print("통과")

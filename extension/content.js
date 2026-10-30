@@ -1,5 +1,7 @@
 // TaskPet — 이 탭의 ChatGPT / Gemini / Claude / Grok / Kimi가 답을 쓰는 중인지 살펴서 TaskPet 로봇에게 알린다.
-// 대화 내용은 읽지 않는다. 보내는 것: 사이트, 답변 중/끝남, 대화 주소(id), 대화 제목.
+// 늘 보내는 것: 사이트, 답변 중/끝남, 대화 주소(id), 대화 제목.
+// 대화 글은 사용자가 로봇에서 이 탭 줄을 펼쳐 보는 동안에만 읽어 보낸다(아래 '로봇에서 대화 보기').
+// 어느 쪽이든 같은 컴퓨터의 TaskPet 프로그램에만 가고, 인터넷으로는 아무것도 보내지 않는다.
 
 // '중지' 버튼 이름 (Claude·Grok 은 이 이름으로만 답하는 중인지 안다) — 사이트 화면이 어느 언어여도 잡히게:
 // 한중일 글자(중지·停止·中止)는 어디에 있어도, 나머지 말은 낱말 첫머리면 '중지'로 본다.
@@ -25,7 +27,7 @@ const SITES = {
     // 입력창 근처에 '중지' 버튼이 있으면 답을 쓰는 중
     generating() {
       return !!document.querySelector('button[data-testid="stop-button"]')
-        || hasStopButton('form button[aria-label], #thread-bottom button[aria-label]');
+        || hasStopButton('form button[aria-label], #thread-bottom button[aria-label], [data-chatgpt-composer] button[aria-label]');
     },
     conv() {
       const m = location.pathname.match(/\/c\/([\w-]+)/);
@@ -165,6 +167,7 @@ function check() {
     if (conv === doneConv || !doneConv) report('done');
     if (conv && !doneConv) doneConv = conv;
   }
+  reportChat(false);           // 로봇에서 이 탭을 보고 있으면 대화 글도
 }
 
 // 답이 한 글자씩 나올 때마다 화면이 바뀌므로, 검사는 0.25초에 한 번으로 묶는다
@@ -177,18 +180,173 @@ function scheduleCheck() {
 // 화면이 바뀔 때마다 확인하고, 뒤쪽 탭에서 화면 갱신이 줄어드는 경우를 대비해 1초마다도 확인
 new MutationObserver(scheduleCheck).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'data-testid', 'class', 'fonticon', 'name'] });
 setInterval(check, 1000);
-check();
 
-// TaskPet 연결 상태를 물어봐서 표시 (연결됨 / 오류 내용)
+// ---- 로봇에서 대화 보기 · 답 보내기 ----
+// 로봇에서 이 탭 줄을 펼치면(watch) 그동안만 대화 글을 읽어 로봇에게 보낸다 — 화면이 바뀔 때, 0.7초에 한 번까지.
+// 로봇 입력칸에 쓴 글은 이 탭 입력창에 붙여 넣고 보내기 버튼을 누른다.
+const MAX_MSGS = 24;       // 최근 메시지 몇 개까지
+const MAX_TEXT = 6000;     // 메시지 하나는 끝에서 이만큼까지
+const SEND_LABEL = /send|submit|보내|전송|제출|送信|发送|發送|傳送|提交|enviar|envoyer|senden|отправ|invia|kirim|gửi|gönder/i;
+// 메시지 칸 안의 화면 읽기용 숨은 제목('말씀하신 내용'·'Claude 응답: …'), 버튼·시각('지금') 글자는 뺀다
+const HIDDEN = '.sr-only, .cdk-visually-hidden, [class*="visually-hidden"], button, [role="button"], time';
+function textOf(el) {
+  if (!el) return '';
+  let t = el.innerText || el.textContent || '';
+  for (const h of (el.querySelectorAll ? el.querySelectorAll(HIDDEN) : [])) {
+    const x = (h.innerText || h.textContent || '').trim();
+    if (x) t = t.replace(x, '');
+  }
+  return t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// 보내기 버튼: 이름(aria-label)으로 찾되 음성·중지 버튼은 뺀다
+function sendByLabel(selector) {
+  for (const b of document.querySelectorAll(selector)) {
+    const label = b.getAttribute('aria-label') || '';
+    if (b.offsetParent && SEND_LABEL.test(label) && !NOT_STOP.test(label) && !isStopLabel(label)) return b;
+  }
+  return null;
+}
+
+// 사이트마다: msgs() = [['me'|'ai', 글], ...] (위에서부터), editor() = 입력창, send() = 보내기 버튼
+const CHAT = {
+  chatgpt: {
+    msgs() {
+      const turns = document.querySelectorAll('[data-turn-key]');
+      if (turns.length) {
+        const out = [];
+        for (const tn of turns) {
+          const u = tn.querySelector('[data-user-message-bubble]');
+          if (u) out.push(['me', textOf(u)]);
+          const a = tn.querySelector('[data-chatgpt-selection-message-id]');
+          if (a) out.push(['ai', textOf(a)]);
+        }
+        return out;
+      }
+      return [...document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')]
+        .map(m => [m.dataset.messageAuthorRole === 'user' ? 'me' : 'ai',
+                   textOf(m.querySelector('.markdown, .whitespace-pre-wrap') || m)]);
+    },
+    editor: () => document.querySelector('[data-composer-input] [contenteditable="true"], #prompt-textarea, .ProseMirror[contenteditable="true"]'),
+    send: () => document.querySelector('button[data-testid="send-button"], #composer-submit-button')
+      || sendByLabel('[data-chatgpt-composer] button, form button'),
+  },
+  claude: {
+    msgs: () => [...document.querySelectorAll('[data-testid="user-message"], [data-testid="assistant-message"]')]
+      .map(m => [m.dataset.testid === 'user-message' ? 'me' : 'ai', textOf(m)]),
+    editor: () => document.querySelector('[data-testid="chat-input"][contenteditable="true"], [data-testid="chat-input"] [contenteditable="true"], .ProseMirror[contenteditable="true"]'),
+    send: () => document.querySelector('button[data-testid="chat-input-send"]') || sendByLabel('fieldset button, form button'),
+  },
+  gemini: {
+    msgs: () => [...document.querySelectorAll('user-query, model-response')]
+      .map(m => m.tagName === 'USER-QUERY' ? ['me', textOf(m.querySelector('.query-text') || m)]
+                                           : ['ai', textOf(m.querySelector('message-content') || m)]),
+    editor: () => document.querySelector('rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"]'),
+    send: () => document.querySelector('button.send-button') || sendByLabel('input-area-v2 button, .input-area button'),
+  },
+  grok: {
+    // 내 메시지 줄은 오른쪽 정렬(items-end), 답은 왼쪽
+    msgs: () => [...document.querySelectorAll('[id^="response-"]')]
+      .map(r => [/\bitems-end\b/.test(r.className) ? 'me' : 'ai', textOf(r.querySelector('.message-bubble') || r)]),
+    editor: () => document.querySelector('.tiptap.ProseMirror[contenteditable="true"], form textarea'),
+    send: () => document.querySelector('form button[type="submit"]') || sendByLabel('form button'),
+  },
+  kimi: {
+    msgs: () => [...document.querySelectorAll('.chat-content-item')]
+      .map(m => [/user/.test(m.className) ? 'me' : 'ai', textOf(m.querySelector('.segment-content-box, .markdown') || m)]),
+    editor: () => document.querySelector('.chat-input-editor[contenteditable="true"], .chat-input-editor'),
+    send: () => document.querySelector('.send-button-container'),
+  },
+};
+const C = CHAT[SITE];
+
+let watching = false;
+let lastChat = '';
+let lastChatAt = 0;
+
+function reportChat(force) {
+  if (!watching) return;
+  const now = Date.now();
+  if (!force && now - lastChatAt < 700) return;   // 답이 한 글자씩 나오는 동안엔 0.7초에 한 번
+  let msgs = [];
+  try { msgs = C.msgs(); } catch (e) { /* 사이트 화면이 바뀌었으면 빈 목록 */ }
+  msgs = msgs.filter(m => m[1]).slice(-MAX_MSGS)
+    .map(([r, t]) => [r, t.length > MAX_TEXT ? '…' + t.slice(-MAX_TEXT) : t]);
+  const working = state === 'working';
+  const key = JSON.stringify([working, msgs]);
+  if (key === lastChat && !force) return;
+  lastChat = key;
+  lastChatAt = now;
+  try { chrome.runtime.sendMessage({ type: 'chat', site: SITE, conv: S.conv(), title: title(), working, msgs }); } catch (e) { /* 확장 다시 불러와짐 */ }
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+async function waitFor(fn, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { const v = fn(); if (v) return v; await sleep(100); }
+  return fn();
+}
+const editorText = (ed) => (ed.tagName === 'TEXTAREA' ? ed.value : ed.innerText || '').trim();
+function setTextarea(ed, v) {
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(ed, v);
+  ed.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// 결과의 error 는 로봇이 자기 언어로 바꿔 보여 줄 짧은 이름
+async function sendText(msg) {
+  const ed = C.editor();
+  if (!ed) return { ok: false, error: 'no_editor' };
+  if (S.generating()) return { ok: false, error: 'busy' };
+  if (editorText(ed)) return { ok: false, error: 'draft' };     // 그 탭에 쓰던 글은 건드리지 않는다
+  ed.focus();
+  if (ed.tagName === 'TEXTAREA') {
+    setTextarea(ed, msg);
+  } else {
+    // 붙여 넣기로 넣으면 여러 줄도 그대로 들어간다 (안 되는 사이트는 글자 넣기로)
+    const dt = new DataTransfer();
+    dt.setData('text/plain', msg);
+    ed.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    await sleep(150);
+    if (!editorText(ed)) document.execCommand('insertText', false, msg);
+  }
+  const btn = await waitFor(() => {
+    const b = C.send();
+    return b && !b.disabled && b.getAttribute('aria-disabled') !== 'true' ? b : null;
+  }, 3000);
+  if (!btn) return { ok: false, error: 'no_send' };
+  btn.click();
+  const sent = await waitFor(() => !editorText(C.editor() || ed) || S.generating(), 4000);
+  return sent ? { ok: true } : { ok: false, error: 'not_sent' };
+}
+
+chrome.runtime.onMessage.addListener((m, sender, reply) => {
+  if (!m) return;
+  if (m.type === 'watch') {
+    watching = !!m.on;
+    if (watching) { lastChat = ''; reportChat(true); }
+  } else if (m.type === 'send') {
+    sendText(String(m.text || '')).then(reply, (e) => reply({ ok: false, error: 'error: ' + e }));
+    return true;
+  }
+});
+
+// TaskPet 연결 상태를 물어봐서 표시 (연결됨 / 오류 내용). 로봇이 이 탭을 보고 있는지도 함께 받는다
+// (페이지를 새로 고쳤거나 확장이 다시 불러와져도 이어서 보내도록)
 function hello() {
   try {
     chrome.runtime.sendMessage({ type: 'hello' }, (r) => {
       root.dataset.taskpetLink = chrome.runtime.lastError ? '확장 오류: ' + chrome.runtime.lastError.message
         : (r && r.connected ? '연결됨' : '연결 안 됨: ' + ((r && r.error) || '알 수 없음'));
+      if (r && !chrome.runtime.lastError) {
+        const was = watching;
+        watching = !!r.watched;
+        if (watching && !was) { lastChat = ''; reportChat(true); }
+      }
     });
   } catch (e) {
     root.dataset.taskpetLink = '확장 다시 불러와짐: 새로 고침 필요';
   }
 }
+check();
 hello();
 setInterval(hello, 10000);

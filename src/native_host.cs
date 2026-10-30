@@ -2,8 +2,11 @@
 // 브라우저가 확장의 요청으로 이 프로그램을 띄우고, 표준 입출력으로 [4바이트 길이 + UTF-8 JSON]을 주고받는다.
 //   확장 → 여기: {"type":"state","state":"working|done|closed","tab":1,"conv":"...","title":"..."}
 //          → 같은 폴더 events.jsonl 에 {"ev":"web","t":ms,"d":{...}} 한 줄 덧붙임 (로봇이 읽음)
-//   로봇 → 여기: 같은 폴더 web-cmd.jsonl 에 {"cmd":"open","tab":1,"conv":"...","browser":"chrome"} 한 줄
-//          → 확장에게 그대로 전달 (그 탭을 앞으로 가져옴)
+//   확장 → 여기: {"type":"chat","tab":1,"msgs":[["me","..."],["ai","..."]],"working":false,...}
+//          (로봇에서 그 탭 줄을 펼쳐 보는 동안만) → web-chat\<브라우저>-<탭>.json 에 통째로 덮어씀 (로봇이 그려 줌)
+//   확장 → 여기: {"type":"sent","tab":1,"ok":true,"error":""} (로봇에서 보낸 답의 결과) → events.jsonl 에 한 줄
+//   로봇 → 여기: 같은 폴더 web-cmd.jsonl 에 {"cmd":"open"|"watch"|"unwatch"|"send","tab":1,...,"browser":"chrome"} 한 줄
+//          → 확장에게 그대로 전달 (탭 앞으로 / 대화 보기 켜고 끄기 / 그 탭에 답 보내기)
 // 브라우저마다 이 프로그램이 하나씩 뜨므로, 자기를 띄운 브라우저(brave·chrome·msedge…)를 알아내
 // 신호에 "browser"를 붙이고, 명령도 자기 브라우저 것만 넘긴다 (탭 번호는 브라우저마다 따로라서).
 using System;
@@ -120,6 +123,32 @@ class TaskPetNative
         }
     }
 
+    // 탭 대화 글을 web-chat\<브라우저>-<탭>.json 으로 (임시 파일에 쓰고 바꿔치기 → 로봇이 반쯤 쓴 파일을 읽지 않게)
+    static void WriteChat(string dir, string msg)
+    {
+        var tab = Regex.Match(msg, "\"tab\"\\s*:\\s*(\\d+)");
+        if (!tab.Success) return;
+        string folder = Path.Combine(dir, "web-chat");
+        string path = Path.Combine(folder, (Browser.Length > 0 ? Browser : "web") + "-" + tab.Groups[1].Value + ".json");
+        try
+        {
+            Directory.CreateDirectory(folder);
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, msg, new UTF8Encoding(false));
+            for (int k = 0; k < 10; k++)
+            {
+                try
+                {
+                    if (File.Exists(path)) File.Replace(tmp, path, null);
+                    else File.Move(tmp, path);
+                    return;
+                }
+                catch (IOException) { Thread.Sleep(30); }
+            }
+        }
+        catch { }
+    }
+
     // 로봇이 web-cmd.jsonl 에 적은 명령을 확장에게 넘긴다 (켜진 뒤 새로 적힌 것만)
     static void WatchCommands(string dir)
     {
@@ -184,7 +213,15 @@ class TaskPetNative
             var body = new byte[len];
             if (!ReadExactly(input, body, len)) return 0;
             string msg = Encoding.UTF8.GetString(body).Trim();
-            if (msg.StartsWith("{") && Regex.IsMatch(msg, "\"type\"\\s*:\\s*\"state\""))
+            if (!msg.StartsWith("{")) continue;
+            var type = Regex.Match(msg, "\"type\"\\s*:\\s*\"(\\w+)\"");
+            if (!type.Success) continue;
+            if (type.Groups[1].Value == "chat")
+            {
+                WriteChat(dir, msg);
+                continue;
+            }
+            if (type.Groups[1].Value == "state" || type.Groups[1].Value == "sent")
             {
                 // 어느 브라우저 탭인지 붙여 둔다
                 if (Browser.Length > 0)

@@ -64,6 +64,12 @@ def main():
                     os.path.join(SRC, "native_host.cs")], check=True)
     print("Native Messaging 연결 완료")
 
+    term = os.path.join(BUILD, "taskpet-term.exe")
+    subprocess.run([CSC, "/nologo", "/codepage:65001", "/optimize+", "/target:exe",
+                    f"/out:{term}", f"/win32icon:{icon}",
+                    os.path.join(SRC, "term.cs")], check=True)
+    print("터미널 도우미 완료")
+
     app = os.path.join(BUILD, "app")
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
@@ -75,7 +81,7 @@ def main():
     ], check=True)
     folder = os.path.join(app, "TaskPet")
     # 훅·감시·연결 프로그램과 브라우저 확장은 설치 폴더 맨 위에 있어야 하는 것들 → _internal 이 아니라 맨 위에
-    for f in (hook, gpt, native):
+    for f in (hook, gpt, native, term):
         shutil.copy2(f, folder)
     shutil.copytree(os.path.join(ROOT, "extension"), os.path.join(folder, "chrome-extension"))
     print("폴더판 완료")

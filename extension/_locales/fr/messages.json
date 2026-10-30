@@ -1,6 +1,6 @@
 {
   "extDesc": {
-    "message": "Indique au robot TaskPet (Windows) si ChatGPT, Gemini, Claude, Grok ou Kimi répond encore ou a fini. Ne lit jamais vos discussions.",
+    "message": "Prévient le robot TaskPet (Windows) quand ChatGPT, Gemini, Claude, Grok ou Kimi répond ou a fini ; répondez-y. Tout reste sur le PC.",
     "description": "Store/extension description (max 132 chars)"
   },
   "newChat": {

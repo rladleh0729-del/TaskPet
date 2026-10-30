@@ -1,6 +1,6 @@
 {
   "extDesc": {
-    "message": "Сообщает роботу TaskPet (Windows), отвечает ли ещё ChatGPT, Gemini, Claude, Grok или Kimi или уже закончил. Не читает переписку.",
+    "message": "Сообщает роботу TaskPet (Windows), когда ChatGPT, Gemini, Claude, Grok или Kimi отвечает или закончил; отвечайте из него. Всё на ПК.",
     "description": "Store/extension description (max 132 chars)"
   },
   "newChat": {

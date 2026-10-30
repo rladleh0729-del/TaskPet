@@ -1,6 +1,6 @@
 {
   "extDesc": {
-    "message": "將 ChatGPT、Gemini、Claude、Grok、Kimi 的 AI 回答狀態（回答中／已完成）告訴 TaskPet 桌面機器人（Windows）。不讀取對話內容。",
+    "message": "把 ChatGPT、Gemini、Claude、Grok、Kimi 的回答中/完成狀態告訴 TaskPet 機器人（Windows），並可在機器人中直接回覆。資料不會離開你的電腦。",
     "description": "Store/extension description (max 132 chars)"
   },
   "newChat": {

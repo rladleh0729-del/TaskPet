@@ -38,12 +38,13 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 from i18n import FONTS, LANG_NAMES, TOOL_TR, TR, UNITS
 
 APP = "TaskPet"
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 HOME = os.path.expanduser("~")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", HOME), APP)
 HOOK_EXE = "taskpet-hook.exe"
 GPT_EXE = "taskpet-chatgpt.exe"
 NATIVE_EXE = "taskpet-native.exe"
+TERM_EXE = "taskpet-term.exe"      # 터미널에서 도는 Claude Code 에 답 넣기·그 창 앞으로
 NATIVE_NAME = "kr.querybot.taskpet"
 # 확장 'TaskPet for ChatGPT'의 ID (manifest.json의 key로 고정됨)
 # 연결을 허용할 브라우저 확장: Chrome 웹 스토어판, 직접 불러온 개발판(manifest "key"로 고정)
@@ -60,7 +61,8 @@ STATE = os.path.join(APP_DIR, "state.json")
 SETTINGS = os.path.join(APP_DIR, "settings.json")   # 로봇 위치, 소리 끄기
 DRAFTS = os.path.join(APP_DIR, "drafts.json")       # 세션마다 로봇에서 쓰던 글·붙인 이미지
 QUIT_FLAG = os.path.join(APP_DIR, "quit.flag")
-WEB_CMD = os.path.join(APP_DIR, "web-cmd.jsonl")   # 로봇 → 브라우저 확장 (탭 열기)
+WEB_CMD = os.path.join(APP_DIR, "web-cmd.jsonl")   # 로봇 → 브라우저 확장 (탭 열기·대화 보기·답 보내기)
+WEB_CHAT_DIR = os.path.join(APP_DIR, "web-chat")    # 확장이 보낸 탭 대화 글 (로봇에서 펼쳐 보는 동안만, 닫으면 지움)
 # Claude 데스크톱은 MSIX 앱이라 그 안에서 실행된 훅이 쓰는 %LOCALAPPDATA% 는
 # Packages\<앱>\LocalCache\Local 로 옮겨진다 (바깥 프로그램에는 안 보임). 그쪽 신호 파일도 읽는다.
 PKG_EVENTS = os.path.join(os.environ.get("LOCALAPPDATA", HOME), "Packages", "*",
@@ -72,13 +74,15 @@ NO_WINDOW = 0x08000000
 # ---- 언어 ----
 # 설정 메뉴에서 고른 언어(settings.json 의 "lang"), 없으면 Windows 표시 언어. 한국어·영어는 아래 T 표, 나머지는 i18n.py
 def pick_lang():
-    try:
-        with open(SETTINGS, encoding="utf-8") as f:
-            v = json.load(f).get("lang")
-        if v in dict(LANG_NAMES):
-            return v
-    except (OSError, ValueError, AttributeError):
-        pass
+    # 설치·업데이트 중(설치 폴더 밖에서 켜짐)에는 설치된 로봇의 설정을 본다 → 안내 상자도 고른 언어로
+    for path in (SETTINGS, os.path.join(INSTALL_DIR, "settings.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                v = json.load(f).get("lang")
+            if isinstance(v, str) and v in dict(LANG_NAMES):
+                return v
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
     lid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
     main_id, sub = lid & 0x3FF, lid >> 10
     if main_id == 0x04:                                   # 중국어: 대만·홍콩·마카오는 번체
@@ -128,6 +132,9 @@ T = {
     "ext_menu": ("브라우저 확장 설치 (웹 스토어)", "Install browser extension (Web Store)"),
     "back": ("목록", "list"),
     "answer_in_app": ("여러 문항 질문이라 앱에서 답해 주세요", "Multi-question card: answer it in the app"),
+    "gpt_open_hint": ("ChatGPT 앱에서 이 대화를 열어 두면 여기에 보여요", "Open this chat in the ChatGPT app to see it here"),
+    "answer_in_term": ("이 질문은 터미널에서 골라 주세요 (더블 클릭하면 그 터미널로)",
+                       "Pick an answer in the terminal (double-click to go there)"),
     "img_hint": ("누르면 빼기", "click to remove"),
     "img_pick": ("이미지", "Images"),
     "img_broken": ("(그림 열기 실패)", "(could not open image)"),
@@ -157,6 +164,20 @@ T = {
     "install_failed": ("설치 중 오류가 났습니다:\n\n", "Install failed:\n\n"),
     "lang_menu": ("언어 · Language", "Language"),
     "lang_auto": ("자동 (Windows 설정)", "Automatic (Windows setting)"),
+    # 웹 탭에 답 보내기가 안 됐을 때 (확장이 짧은 이름으로 알려 줌)
+    # 터미널 Claude Code 에 답 넣기가 안 됐을 때
+    "term_err_gone": ("그 터미널의 Claude Code 가 꺼져 있어요", "The Claude Code in that terminal is no longer running"),
+    "term_err_no_console": ("그 터미널에 연결하지 못했어요", "Couldn't connect to that terminal"),
+    "term_err_no_helper": ("터미널 도우미 프로그램이 없어요. TaskPet 을 다시 설치해 주세요",
+                           "The terminal helper is missing. Please reinstall TaskPet"),
+    "web_err_no_editor": ("그 탭에서 입력창을 찾지 못했어요", "Couldn't find the message box in that tab"),
+    "web_err_busy": ("AI가 아직 답하는 중이에요. 끝난 뒤에 보내 주세요", "The AI is still answering. Send it after it finishes"),
+    "web_err_draft": ("그 탭 입력창에 쓰던 글이 있어서 보내지 않았어요", "That tab's message box already has text, so nothing was sent"),
+    "web_err_no_send": ("보내기 버튼을 찾지 못했어요", "Couldn't find the send button"),
+    "web_err_not_sent": ("보내기를 눌렀지만 보내지지 않았어요", "Pressed send, but the message didn't go out"),
+    "web_err_no_tab": ("그 탭이 닫혔거나 새로 고침이 필요해요", "That tab was closed or needs to be reloaded"),
+    "web_err_timeout": ("브라우저 확장이 답하지 않아요. 확장을 1.3.0 이상으로 업데이트하고 탭을 새로 고쳐 주세요",
+                        "The browser extension didn't respond. Update it to 1.3.0 or later and reload the tab"),
 }
 
 
@@ -893,6 +914,7 @@ def _install():
     exe = os.path.join(INSTALL_DIR, "TaskPet.exe")
     updating = os.path.exists(exe)
     remove_old_copies(INSTALL_DIR)
+    subprocess.run(["taskkill", "/f", "/im", NATIVE_EXE], capture_output=True, creationflags=NO_WINDOW)
     # 폴더판: 풀린 폴더(TaskPet.exe + _internal + 훅·감시·연결 프로그램 + 브라우저 확장 압축 해제본)를 통째로 복사.
     # 예전 버전의 파이썬 부품은 먼저 지워 섞이지 않게 (못 지운 파일은 copy_retry 가 비켜 두고 덮음)
     shutil.rmtree(os.path.join(INSTALL_DIR, "_internal"), ignore_errors=True)
@@ -901,6 +923,15 @@ def _install():
         os.makedirs(dst, exist_ok=True)
         for name in files:
             copy_retry(os.path.join(base, name), os.path.join(dst, name))
+    # 예전에 Claude 데스크톱 앱(MSIX) 안에서 설치한 적이 있으면 그 앱의 가상 공간에 옛 사본이 남아,
+    # 앱 안에서 도는 Claude Code(앱 터미널 포함)는 계속 옛 훅을 쓴다 → 남아 있는 도우미만 새것으로 덮어쓴다
+    for d in glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", HOME), "Packages", "*", "LocalCache", "Local", APP)):
+        for name in (HOOK_EXE, GPT_EXE, NATIVE_EXE, TERM_EXE):
+            if os.path.exists(os.path.join(d, name)):
+                try:
+                    copy_retry(os.path.join(INSTALL_DIR, name), os.path.join(d, name))
+                except OSError:
+                    pass
     for p in glob.glob(os.path.join(INSTALL_DIR, "*.wav")):   # 알림 소리는 새 버전이 켜질 때 다시 만든다
         try:
             os.remove(p)
@@ -1045,6 +1076,9 @@ class ChatGptWatcher:
             if "reply" in obj:            # 답 보내기 결과
                 self.reply_result = obj["reply"]
                 self.sent_at = 0.0
+            elif "gptchat" in obj:        # ChatGPT 앱 대화 글 (로봇에서 그 줄을 펼쳐 볼 때만 물어봄)
+                self.chat_result = obj["gptchat"]
+                self.chat_seq = getattr(self, "chat_seq", 0) + 1
             else:
                 self.report = obj
                 self.fresh = True
@@ -1080,6 +1114,29 @@ class ChatGptWatcher:
             # 감시 프로그램이 창에 포커스를 줄 수 있게 허락 (지금은 로봇을 막 누른 참이라 로봇이 맨 앞)
             ctypes.windll.user32.AllowSetForegroundWindow(self.proc.pid)
             self.proc.stdin.write(f"{cmd}\t{title}\t{b64}\t{imgs}\t{int(restore or 0)}\n".encode("utf-8"))
+            self.proc.stdin.flush()
+            self.sent_at = time.time()
+        except OSError:
+            self.reply_result = t("reply_nohelper")
+
+    def ask_chat(self, title):
+        """ChatGPT 앱에 지금 열린 대화가 그 제목이면 메시지를 읽어 달라고 한다. 결과는 chat_result."""
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.write(f"gptchat\t{title}\n".encode("utf-8"))
+                self.proc.stdin.flush()
+            except OSError:
+                pass
+
+    def reply_gpt(self, title, text):
+        """ChatGPT 앱 그 대화에 글을 넣어 보낸다 (창은 앞으로 가져오지 않음). 결과는 take_reply()."""
+        self.reply_result = None
+        if not (self.proc and self.proc.poll() is None):
+            self.reply_result = t("reply_nohelper")
+            return
+        b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        try:
+            self.proc.stdin.write(f"replygpt\t{title}\t{b64}\n".encode("utf-8"))
             self.proc.stdin.flush()
             self.sent_at = time.time()
         except OSError:
@@ -1220,6 +1277,59 @@ class Updater:
             e["phase"] = "fail"
 
 
+def term_exe():
+    return next((p for p in (os.path.join(APP_DIR, TERM_EXE), os.path.join(APP_DIR, "..", "build", TERM_EXE))
+                 if os.path.exists(p)), None)
+
+
+def term_run(cmd, e, text=""):
+    """터미널 도우미 실행 → 결과 이름 (ok / gone / no_console / no_helper / error)."""
+    exe = term_exe()
+    if not exe:
+        return "no_helper"
+    args = [exe, cmd, str(e.get("cc_pid", 0)), str(e.get("cc_start", 0))]
+    if cmd == "send":
+        args.append(base64.b64encode(text.encode("utf-8")).decode("ascii"))
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=15, creationflags=NO_WINDOW)
+        return r.stdout.decode("utf-8", "ignore").strip() or "error"
+    except (OSError, subprocess.TimeoutExpired):
+        return "error"
+
+
+def is_term(e):
+    """터미널(cli)에서 도는 Claude Code 세션이고, 그 프로세스를 훅이 알려 줬는지."""
+    return e.get("src") == "claude" and e.get("entry") == "cli" and bool(e.get("cc_pid"))
+
+
+def web_command(obj):
+    """로봇 → 브라우저 확장 명령 한 줄 (연결 프로그램이 읽어 그 브라우저 확장에게 넘김)."""
+    try:
+        with open(WEB_CMD, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def web_chat_file(e):
+    return os.path.join(WEB_CHAT_DIR, f"{e.get('browser') or 'web'}-{e.get('tab')}.json")
+
+
+def web_turns(msgs):
+    """확장이 보낸 [['me'|'ai', 글], ...] → 대화 기록창의 턴 목록 (Claude Code 기록과 같은 모양)."""
+    turns = []
+    for m in msgs:
+        if not isinstance(m, (list, tuple)) or len(m) < 2:
+            continue
+        role, text = m[0], str(m[1])
+        if role == "me" or not turns:
+            turns.append({"me": text if role == "me" else "", "t0": 0, "imgs": [], "parts": [], "open": None})
+            if role == "me":
+                continue
+        turns[-1]["parts"].append(("text", text))
+    return turns
+
+
 def open_task(key, e):
     if e.get("src") == "update":
         Updater.install(e)
@@ -1241,9 +1351,8 @@ def open_task(key, e):
             ["tasklist", "/fi", f"imagename eq {exe}", "/nh"], capture_output=True,
             creationflags=NO_WINDOW).stdout.decode("cp949", "ignore").lower().find(exe) >= 0
         if alive:
-            with open(WEB_CMD, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"cmd": "open", "tab": e.get("tab"), "conv": e.get("conv", ""),
-                                    "url": url, "browser": browser}) + "\n")
+            web_command({"cmd": "open", "tab": e.get("tab"), "conv": e.get("conv", ""),
+                         "url": url, "browser": browser})
         else:
             try:
                 path = e.get("browser_path", "")
@@ -1257,6 +1366,13 @@ def open_task(key, e):
     if e.get("src") in ("chatgpt", "claudechat"):
         if GPT:
             GPT.open(e.get("title", ""), "claude" if e.get("src") == "claudechat" else "chatgpt")
+        return
+    if is_term(e):
+        try:                                      # 도우미가 창을 앞으로 가져올 수 있게 허락
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)
+        except Exception:
+            pass
+        threading.Thread(target=term_run, args=("focus", e), daemon=True).start()
         return
     if e.get("src") == "codex":
         url = f"codex://threads/{e.get('id')}"
@@ -1825,6 +1941,7 @@ class Tracker:
         self.last_codex_scan = 0
         self.gpt_working = None           # 직전에 '작업 중'이던 일반 채팅 제목들 (처음엔 모름)
         self.claude_working = None        # Claude 앱 일반 채팅도 같은 방식
+        self.web_sent = []                # 웹 탭에 보낸 답의 결과 (키, 됐는지, 오류 이름) — 화면 쪽이 가져감
         self.dirty = False
 
     def save(self):
@@ -2056,6 +2173,10 @@ class Tracker:
         browser = d.get("browser", "")
         key = f"w:{browser}:{tab}" if browser else f"w:{tab}"
         e = self.tasks.get(key)
+        if d.get("type") == "sent":              # 로봇에서 보낸 답이 그 탭에 들어갔는지
+            if live:
+                self.web_sent.append((key, bool(d.get("ok")), str(d.get("error") or ""), d.get("id")))
+            return
         state = d.get("state")
         if state == "closed":
             if e:
@@ -2089,6 +2210,19 @@ class Tracker:
         self.dirty = True
 
     def claude_event(self, rec):
+        d = rec.get("d") or {}
+        key = "c:" + str(d.get("session_id")) if d.get("session_id") else None
+        old = self.tasks.get(key) if key else None
+        self._claude_event(rec)
+        e = self.tasks.get(key) if key else None
+        if e is not None and e is not old and old and old.get("entry") and not e.get("entry"):
+            e["entry"] = old["entry"]            # 새 턴으로 줄을 새로 만들어도 어디서 도는 세션인지는 그대로
+        if e is not None and d.get("cc_pid"):
+            e["cc_pid"], e["cc_start"] = d["cc_pid"], d.get("cc_start", 0)
+        elif e is not None and old and old.get("cc_pid") and not e.get("cc_pid"):
+            e["cc_pid"], e["cc_start"] = old["cc_pid"], old.get("cc_start", 0)
+
+    def _claude_event(self, rec):
         if rec.get("ev") == "web":
             return self.web_event(rec)
         ev, d = rec.get("ev"), rec.get("d") or {}
@@ -2238,7 +2372,7 @@ class Tracker:
         self.drop_deleted()
         for key, e in self.tasks.items():
             # 답변·세션을 연 곳을 아직 안 꺼내 둔 줄(새로 시작한 줄, 로봇을 다시 켰을 때 등)은 한 번 꺼내 둔다
-            if e.get("src") == "claude" and "entry" not in e and e.get("transcript"):
+            if e.get("src") == "claude" and not e.get("entry") and e.get("transcript"):
                 self.note_answer(e, e["transcript"])
                 self.dirty = True
             # '백그라운드 기다리는 중'이 실제로는 끝나 있고 질문으로 멈춘 상태면 바로잡는다
@@ -2517,6 +2651,11 @@ class Pet:
         global GPT
         GPT = ChatGptWatcher()
         make_sounds(missing_only=True)
+        for f in glob.glob(os.path.join(WEB_CHAT_DIR, "*")):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
         if FROZEN:
             threading.Thread(target=remove_old_extracts, daemon=True).start()
         self.tick()
@@ -2571,7 +2710,7 @@ class Pet:
         m.add_command(label=t("ext_menu"), command=self.get_extension)
         m.add_separator()
         m.add_command(label=t("uninstall"), command=self.do_uninstall)
-        m.add_command(label=t("quit"), command=self.root.destroy)
+        m.add_command(label=t("quit"), command=self.quit)
         m.tk_popup(e.x_root, e.y_root)
 
     # ---- 보고 있는 창은 알리지 않기 · 말풍선 자동 숨김 ----
@@ -2624,7 +2763,7 @@ class Pet:
         카드 전체를 다시 만들지 않으므로 입력칸에 쓰던 글이 끊기지 않는다."""
         ch = self._chat
         e = self.tracker.tasks.get(self.detail) if self.detail else None
-        if not ch or not e or not e.get("transcript"):
+        if not ch or not e or not self.has_chat(e):
             return
         if time.time() - getattr(self, "_live_at", 0) < 1:
             return
@@ -2690,7 +2829,7 @@ class Pet:
                 break
             except OSError:
                 continue
-        self.root.destroy()
+        self.quit()
 
     def ask_autohide(self):
         """말풍선 자동 숨김 시간을 직접 정한다 (초, 3초~1시간)."""
@@ -2736,7 +2875,7 @@ class Pet:
 
     def do_uninstall(self):
         if msgbox(t("ask_uninstall"), 0x24) == 6:
-            self.root.destroy()
+            self.quit()
             uninstall(ask=False, from_widget=True)
 
     def clear_done(self):
@@ -2807,7 +2946,7 @@ class Pet:
     # ---- 반복 ----
     def tick(self):
         if os.path.exists(QUIT_FLAG):
-            self.root.destroy()
+            self.quit()
             return
         self.tick_n += 1
         if self.tick_n % 2 == 1:
@@ -2824,6 +2963,12 @@ class Pet:
             res = GPT.take_reply() if GPT else None
             if res:
                 self.reply_done(res)
+            self.web_results()
+            self.sync_web_watch()
+            res, self._term_result = getattr(self, "_term_result", None), None
+            if res:
+                self.reply_done(res if res == "ok" else
+                                (t("term_err_" + res) if T.get("term_err_" + res) else res))
             self.tracker.poll()
             self.updater.tick()
             found = self.updater.take()
@@ -2919,14 +3064,39 @@ class Pet:
         st = e.get("status")
         return TXT_RED if st == "waiting" else WORKING if st == "working" else DONE_FG if st == "done" else SUB
 
+    @staticmethod
+    def is_web(e):
+        """브라우저 확장이 알려 준 웹 채팅 줄 (탭 번호가 있음)."""
+        return e.get("src") in WEB_SRCS and e.get("tab") is not None
+
+    @staticmethod
+    def is_gpt(e):
+        """ChatGPT 데스크톱 앱의 일반 채팅 줄 (제목으로 찾음)."""
+        return e.get("src") == "chatgpt" and bool(e.get("title"))
+
+    @staticmethod
+    def term_menu(e):
+        """터미널 세션이 선택 메뉴(권한 확인 등)로 멈춘 상태 — 글자를 넣으면 Enter 가 메뉴의 기본 선택을 눌러 버림."""
+        return is_term(e) and e.get("status") == "waiting" and not e.get("ask")
+
     def can_send(self, e):
-        """로봇에서 글을 보낼 수 있는 줄 (Claude 앱·VS Code 세션, 답하는 중에도)."""
+        """로봇에서 글을 보낼 수 있는 줄 (Claude 앱·VS Code 세션은 답하는 중에도, 웹 탭, ChatGPT 앱)."""
+        if self.is_web(e) or self.is_gpt(e):
+            return True
+        if is_term(e):
+            return e.get("status") in ("done", "working", "waiting")
         return (e.get("src") == "claude" and bool(e.get("title"))
                 and e.get("entry") in ("claude-desktop", "claude-vscode")
                 and e.get("status") in ("done", "working", "waiting"))
 
+    def has_chat(self, e):
+        """펼친 카드에 대화 기록창을 그릴 줄."""
+        return (e.get("src") == "claude" and bool(e.get("transcript"))) or self.is_web(e) or self.is_gpt(e)
+
     def has_detail(self, e):
         """› 로 펼칠 내용이 있는 줄 (대화 기록·질문·보내기)."""
+        if self.is_web(e) or self.is_gpt(e):
+            return True
         if e.get("src") != "claude":
             return False
         return bool(e.get("transcript") or (e.get("answer") and self.settings.get("answer_preview", True))
@@ -3043,7 +3213,7 @@ class Pet:
             #  카드가 두 번 다시 만들어져 그사이 쓰던 한글이 끊겼음)
             sig = ("detail", self.detail, e.get("status"), e.get("title", ""), e.get("ask", ""),
                    tuple(c["label"] for c in e.get("choices") or []),
-                   bool(e.get("sending")), tuple(self.reply_imgs))
+                   bool(e.get("sending")), tuple(self.reply_imgs), self.can_send(e), e.get("entry"))
         else:
             sig = ("list", len(items) > 8, tuple(
                 (k, e.get("status"), e.get("title", ""), e.get("prompt", ""), self.has_detail(e),
@@ -3130,10 +3300,13 @@ class Pet:
             head.base = DONE_FG if status == "done" else FG
             head.pack(side="left")
             rows.append((row, head, name.rstrip("…")))
-            self.pill_label(row, e).pack(side="left", padx=(S(6), 0))
+            pill = self.pill_label(row, e)
+            pill.pack(side="left", padx=(S(6), 0))
+            marks = [pill]                       # 이름표·✎ 위도 같은 줄 (올리면 제목 색이 바뀌고, 누르면 펼침)
             if self.drafts.get(key):             # 로봇에서 쓰다 만 글이 있으면 ✎
-                tk.Label(row, text="✎", bg=INNER, fg=WORKING, font=(FONT, 9, "bold")).pack(
-                    side="left", padx=(S(4), 0))
+                pen = tk.Label(row, text="✎", bg=INNER, fg=WORKING, font=(FONT, 9, "bold"))
+                pen.pack(side="left", padx=(S(4), 0))
+                marks.append(pen)
             info = tk.Label(row, text=self.info_text(e, now, short=True), bg=INNER,
                             fg=self.info_color(e),
                             font=(FONT, 8, "bold" if status == "waiting" else "normal"))
@@ -3144,14 +3317,14 @@ class Pet:
             x = tk.Label(row, text=" ✕", bg=INNER, fg=SUB, font=(FONT, 9), cursor="hand2")
             x.pack(side="right")
             x.bind("<Button-1>", lambda ev, k=key: self.dismiss(k))
-            parts = [row, bar, head, info, x]
+            parts = [row, bar, head, *marks, info, x]
             if self.has_detail(e):
                 more = tk.Label(row, text=" ›", bg=INNER, fg=FG, font=(FONT, 12, "bold"),
                                 cursor="hand2")
                 more.pack(side="right")
                 more.bind("<Button-1>", lambda ev, k=key: self.open_detail(k))
                 parts.append(more)
-            for w in (row, bar, head, info):
+            for w in (row, bar, head, *marks, info):
                 w.bind("<Button-1>", lambda ev, k=key: self.row_click(k, ev))
                 w.configure(cursor="hand2")
             # 마우스를 올린 줄은 배경을 살짝 밝게 (더블 클릭할 줄이 어느 것인지 보이게)
@@ -3190,25 +3363,31 @@ class Pet:
         info.short = False
         info.pack(fill="x")
         self._infos.append((key, info))
-        if e.get("src") == "claude" and e.get("transcript"):
-            self.chat_area(card, key, e)         # 대화 기록 (내 메시지 오른쪽 · Claude 왼쪽)
-        card_only = e.get("card") and not e.get("choices")    # 여러 문항 카드는 앱에서 답하게
+        if self.has_chat(e):
+            self.chat_area(card, key, e)         # 대화 기록 (내 메시지 오른쪽 · AI 왼쪽)
+        term = is_term(e)
+        # 여러 문항 카드는 앱에서 답하게 · 터미널 질문은 터미널에서 (터미널 화면의 선택지는 로봇이 못 누름)
+        card_only = ((e.get("card") and not e.get("choices"))
+                     or (term and (e.get("card") or self.term_menu(e))))
         if status == "waiting" and e.get("ask"):
             tk.Label(card, text=e["ask"], bg=INNER, fg=FG, font=(FONT, 9, "bold"), anchor="w",
                      justify="left", wraplength=self.content_w() - S(40)).pack(fill="x", pady=(S(8), S(2)))
             if card_only:
-                tk.Label(card, text=t("answer_in_app"), bg=INNER, fg=SUB, font=(FONT, 8),
+                tk.Label(card, text=t("answer_in_term" if term else "answer_in_app"), bg=INNER, fg=SUB, font=(FONT, 8),
                          anchor="w").pack(fill="x")
             elif not e.get("sending"):
                 for c in e.get("choices") or []:
                     self.big_button(card, c["label"], lambda m=c["message"]: self.send_reply(key, m))
+        if self.term_menu(e):                    # 터미널이 선택 메뉴로 멈춤: 입력칸이 왜 없는지 알려 준다
+            tk.Label(card, text=t("answer_in_term"), bg=INNER, fg=SUB, font=(FONT, 8),
+                     anchor="w").pack(fill="x", pady=(S(8), 0))
         if e.get("sending"):
             tk.Label(card, text=t("reply_sending"), bg=INNER, fg=SUB, font=(FONT, 8),
                      anchor="w").pack(fill="x", pady=(S(6), 0))
         elif (self.can_send(e) or (status == "waiting" and e.get("ask"))) and not card_only:
             # 글은 언제든 여기서 (질문 카드면 '기타'로 들어감). 이미지는 Claude 앱 세션만
-            self.reply_entry(card, key,
-                             allow_img=not e.get("card") and e.get("entry") != "claude-vscode")
+            self.reply_entry(card, key, allow_img=not e.get("card") and e.get("entry") != "claude-vscode"
+                             and not self.is_web(e) and not term and not self.is_gpt(e))
 
     # ---- 대화 기록창 (채팅): 내 메시지는 오른쪽 주황 말풍선, Claude 글은 왼쪽 흰 칸 ----
     # 맨 아래(최신)부터 보이고, 맨 위에서 휠을 더 올리면 이전 대화를 6개씩 더 불러온다.
@@ -3234,6 +3413,38 @@ class Pet:
     def read_chat(self, e, force=False):
         """기록 파일이 바뀌었으면 다시 읽는다 (바뀌었으면 True)."""
         h = self._hist
+        if self.is_gpt(e):                       # ChatGPT 앱: 감시 프로그램이 그 창을 읽어 줌 (열려 있는 대화일 때만)
+            now = time.time()
+            if GPT and now - h.get("asked", 0) > 1.5:
+                h["asked"] = now
+                GPT.ask_chat(e["title"])
+            res = getattr(GPT, "chat_result", None) if GPT else None
+            if not res or res.get("title") != e["title"]:
+                if "turns" in h and not force:
+                    return False
+                # 아직 답이 안 왔으면 빈 기록창 (안내는 '그 대화가 안 열려 있음'이라는 답이 왔을 때만)
+                h["turns"], h["gpt_ok"], h["sig"] = [], True, None
+                h["more"], h["plan"], h["plan_at"] = False, None, 0
+                return True
+            sig = json.dumps([res.get("ok"), res.get("msgs")], ensure_ascii=False)
+            if not force and "turns" in h and sig == h.get("sig"):
+                return False
+            msgs = [[r, x or (t("img_tag") if r == "me" else x)] for r, x in res.get("msgs") or []]
+            h["turns"], h["sig"], h["gpt_ok"] = web_turns(msgs), sig, bool(res.get("ok"))
+            h["more"], h["plan"], h["plan_at"] = False, None, 0
+            return True
+        if self.is_web(e):                       # 웹 탭: 확장이 보내 준 대화 글 파일
+            path = web_chat_file(e)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = 0
+            if not force and "turns" in h and mtime == h.get("mtime"):
+                return False
+            data = read_json(path, {}) if mtime else {}
+            h["turns"] = web_turns(data.get("msgs") or [])
+            h["more"], h["plan"], h["plan_at"], h["mtime"] = False, None, 0, mtime
+            return True
         try:
             mtime = os.path.getmtime(e["transcript"])
         except OSError:
@@ -3255,6 +3466,8 @@ class Pet:
         out = []
         if len(turns) > len(shown) or h.get("more"):
             out.append(("older", ""))
+        if self.is_gpt(e) and not h.get("gpt_ok"):    # ChatGPT 앱에서 다른 대화를 보고 있으면 읽을 수 없음
+            out.append(("omit", t("gpt_open_hint")))
         show_ai = self.settings.get("answer_preview", True)
         self._img_src = e.get("transcript")      # 그림은 자리만 있고, 그릴 때 이 파일에서 꺼낸다
         for turn in shown:
@@ -3907,6 +4120,42 @@ class Pet:
     def send_reply(self, key, text, other=False):
         e = self.tracker.tasks.get(key)
         text = (text or "").strip()
+        if e and is_term(e):                     # 터미널 Claude Code: 도우미가 그 콘솔 입력에 넣고 Enter
+            # 질문 카드·선택 메뉴는 터미널에서 (다른 경로로 새지 않게 여기서 끝)
+            if not text or e.get("sending") or e.get("card") or self.term_menu(e):
+                return
+            e["sending"] = True
+            self.reply_key = key
+            self.reply_imgs = []
+            self.reply_var.set("")
+
+            def work(ent=dict(e), msg=text):
+                self._term_result = term_run("send", ent, msg)
+            threading.Thread(target=work, daemon=True).start()
+            self.update_bubble(force=True)
+            return
+        if e and self.is_gpt(e) and GPT:         # ChatGPT 앱: 감시 프로그램이 그 대화 입력창에 넣고 Enter
+            if not text or e.get("sending"):
+                return
+            e["sending"] = True
+            self.reply_key = key
+            self.reply_imgs = []
+            self.reply_var.set("")
+            GPT.reply_gpt(e["title"], text)
+            self.update_bubble(force=True)
+            return
+        if e and self.is_web(e):                 # 웹 탭: 확장이 그 탭 입력창에 넣고 보내기를 누름
+            if not text or e.get("sending"):
+                return
+            self._web_send_id = getattr(self, "_web_send_id", 0) + 1
+            e.update(sending=True, sent_at=time.time(), send_id=self._web_send_id)
+            self.reply_key = key
+            self.reply_imgs = []
+            self.reply_var.set("")
+            web_command({"cmd": "send", "tab": e["tab"], "browser": e.get("browser", ""),
+                         "text": text, "id": self._web_send_id})
+            self.update_bubble(force=True)
+            return
         images = (list(self.reply_imgs) if other and e and not e.get("card")
                   and e.get("entry") != "claude-vscode" else [])
         if images and not text:           # 이미지만 보내면 짧은 글을 같이
@@ -3927,11 +4176,76 @@ class Pet:
             GPT.reply(e["title"], text, vscode=vs, images=images, restore=self.prev_fg)
         self.update_bubble(force=True)
 
+    def web_results(self):
+        """웹 탭에 보낸 답의 결과를 받고, 15초 넘게 답이 없으면 실패로 (확장이 옛 버전일 때)."""
+        res = self.tracker.web_sent
+        while res:
+            key, ok, err, sid = res.pop(0)
+            e = self.tracker.tasks.get(key)
+            if e and e.get("sending") and e.get("send_id") == sid:
+                self.web_reply_done(key, ok, err)
+        for key, e in list(self.tracker.tasks.items()):
+            if e.get("sending") and self.is_web(e) and time.time() - e.get("sent_at", 0) > 15:
+                self.web_reply_done(key, False, "timeout")
+
+    def web_reply_done(self, key, ok, err):
+        e = self.tracker.tasks.get(key)
+        if e and e.pop("sending", None):
+            self.update_bubble(force=True)
+        if not ok:
+            msg = T.get("web_err_" + err) and t("web_err_" + err) or err
+            threading.Thread(target=msgbox, args=(t("reply_fail", e=msg), 0x30), daemon=True).start()
+
+    def sync_web_watch(self):
+        """펼친 카드가 웹 탭이면 확장에게 그 탭 대화 글을 보내 달라고 하고(20초마다 다시), 닫으면 그만 보내게.
+        다 본 대화 글 파일은 지운다 (대화 내용이 컴퓨터에 남지 않게)."""
+        e = self.tracker.tasks.get(self.detail) if self.detail else None
+        want = self.detail if e and self.is_web(e) else None
+        cur = getattr(self, "_watch", None)
+        now = time.time()
+        if want == cur:
+            if want and now - self._watch_at > 20:
+                web_command({"cmd": "watch", "tab": e["tab"], "browser": e.get("browser", "")})
+                self._watch_at = now
+            return
+        if cur:
+            self.unwatch(self._watch_e)
+        if want:
+            web_command({"cmd": "watch", "tab": e["tab"], "browser": e.get("browser", "")})
+        self._watch, self._watch_e, self._watch_at = want, e, now
+
+    def unwatch(self, e):
+        """확장에게 그 탭 대화 글을 그만 보내게 하고, 받아 둔 파일을 지운다 (그사이 온 글도 2.5초 뒤 한 번 더)."""
+        web_command({"cmd": "unwatch", "tab": e["tab"], "browser": e.get("browser", "")})
+        path = web_chat_file(e)
+
+        def drop():
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        drop()
+        try:
+            self.root.after(2500, drop)
+        except tk.TclError:
+            pass
+
+    def quit(self):
+        """로봇 끄기 (메뉴·언어 바꾸기·제거·quit.flag 모두 여기로): 펼쳐 둔 웹 카드가 있으면 먼저 unwatch."""
+        e = getattr(self, "_watch_e", None)
+        if getattr(self, "_watch", None) and e:
+            web_command({"cmd": "unwatch", "tab": e["tab"], "browser": e.get("browser", "")})
+            try:
+                os.remove(web_chat_file(e))
+            except OSError:
+                pass
+        self.root.destroy()
+
     def reply_done(self, result):
         # 성공하면 곧 Claude Code가 새 턴을 시작해(훅 신호) 줄이 '진행 중'으로 바뀐다
         # 답하는 중에 보낸 글은 새 턴 신호 없이 대기열로 들어가므로, 성공하면 '보내는 중' 표시를 바로 거둔다
         e = self.tracker.tasks.get(self.reply_key)
-        if e and (result != "ok" or e.get("status") == "working"):
+        if e and (result != "ok" or e.get("status") == "working" or self.is_gpt(e)):
             e.pop("sending", None)
             self.update_bubble(force=True)
         if result != "ok":

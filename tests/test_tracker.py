@@ -209,6 +209,20 @@ assert tr.tasks["w:8"]["status"] == "done" and tr.tasks["w:8"]["url"].endswith("
 web("working", tab=10, site="kimi", title="안녕", url="https://www.kimi.ai/chat/k1")
 assert tr.tasks["w:10"]["src"] == "kimi" and taskpet.SRC_LABEL["kimi"] == "Kimi"
 
+# 로봇에서 웹 탭에 보낸 답의 결과: 줄은 그대로, 결과만 화면 쪽에 넘김 (옛 신호는 버림)
+tr.claude_event({"ev": "web", "t": int(time.time() * 1000), "d": {"type": "sent", "tab": 8, "ok": False, "error": "draft"}})
+tr.claude_event({"ev": "web", "t": int((time.time() - 120) * 1000), "d": {"type": "sent", "tab": 8, "ok": True}})
+assert tr.web_sent == [("w:8", False, "draft", None)] and tr.tasks["w:8"]["status"] == "done", tr.web_sent
+tr.web_sent.clear()
+# 확장이 보낸 대화 글 → 기록창 턴 (내 메시지마다 새 턴, 답은 그 턴의 글)
+turns = taskpet.web_turns([["ai", "먼저 온 인사"], ["me", "질문 1"], ["ai", "답 1"], ["ai", "덧붙임"],
+                           ["me", "질문 2"], ["x"], "잘못된 칸"])
+assert [(x["me"], x["parts"]) for x in turns] == [("", [("text", "먼저 온 인사")]),
+                                                  ("질문 1", [("text", "답 1"), ("text", "덧붙임")]),
+                                                  ("질문 2", [])], turns
+assert taskpet.web_chat_file({"browser": "brave", "tab": 8}).endswith(os.path.join("web-chat", "brave-8.json"))
+assert taskpet.Pet.is_web(tr.tasks["w:8"]) and not taskpet.Pet.is_web({"src": "claude", "tab": 1})
+
 # 브라우저 두 개: 같은 탭 번호라도 브라우저가 다르면 다른 줄, 닫기도 그 브라우저 것만
 web("working", tab=20, site="grok", title="그록 대화", browser="brave", browser_path=r"C:\b\brave.exe")
 web("working", tab=20, site="gemini", title="제미나이 대화", browser="chrome")
@@ -488,6 +502,29 @@ assert list(tr3.tasks) == ["c:new1"]
 tr3.tasks, tr3.dismissed = {}, {"c:new1": time.time()}
 tr3.add_recent_claude()
 assert tr3.tasks == {}                             # 지운 뒤 새 일이 없으면 안 띄움
+
+# 터미널 Claude Code: 훅이 알려 준 Claude Code 프로세스(번호·시작 시각)를 줄에 기억 → 로봇에서 답 넣기
+tr4 = taskpet.Tracker(lambda kind, key: None)
+tr4.claude_event({"ev": "start", "t": int(time.time() * 1000),
+                  "d": {"session_id": "term1", "prompt": "안녕", "cwd": r"C:\x", "cc_pid": 1234, "cc_start": 99}})
+te = tr4.tasks["c:term1"]
+assert te["cc_pid"] == 1234 and te["cc_start"] == 99, te
+assert not taskpet.is_term(te)                      # 기록 파일에서 터미널(cli)인지 알기 전
+te["entry"] = "cli"
+assert taskpet.is_term(te) and not taskpet.is_term({"src": "claude", "entry": "cli"})
+tr4.claude_event({"ev": "stop", "t": int(time.time() * 1000), "d": {"session_id": "term1"}})
+assert tr4.tasks["c:term1"]["cc_pid"] == 1234       # 번호 없는 신호가 와도 그대로
+# 다음 턴(start)이 줄을 새로 만들어도 터미널(entry)·프로세스 번호는 이어받는다
+tr4.tasks["c:term1"]["entry"] = "cli"                # (실제로는 끝난 뒤 기록 파일에서 읽어 채움)
+tr4.claude_event({"ev": "start", "t": int(time.time() * 1000),
+                  "d": {"session_id": "term1", "prompt": "또", "cwd": r"C:\x"}})
+te = tr4.tasks["c:term1"]
+assert te["entry"] == "cli" and te["cc_pid"] == 1234 and taskpet.is_term(te), te
+# 권한 확인 같은 선택 메뉴로 멈춘 터미널(질문 글 없는 응답 대기)은 로봇에서 글을 넣지 않는다
+te["status"] = "waiting"
+assert taskpet.Pet.term_menu(te)
+te["ask"] = "어느 쪽으로 할까요?"
+assert not taskpet.Pet.term_menu(te)
 
 # 다른 언어들: 번역표 열쇠·자리표시({d} 등)가 영어와 같고, 시간·도구 글이 그 언어로
 import re  # noqa: E402
